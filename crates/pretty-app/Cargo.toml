@@ -1,0 +1,42 @@
+[package]
+name = "pretty-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Pretty, a hardware accelerated kitty-compatible terminal emulator"
+
+[[bin]]
+name = "pretty"
+path = "src/main.rs"
+
+[features]
+default = ["vulkan", "gles"]
+vulkan = ["pretty-renderer/vulkan"]
+gles = ["pretty-renderer/gles"]
+metal = ["pretty-renderer/metal"]
+dx = ["pretty-renderer/dx"]
+android = ["winit/android-native-activity"]
+
+[dependencies]
+pretty-core.workspace = true
+pretty-renderer.workspace = true
+crossbeam-channel.workspace = true
+directories.workspace = true
+egui.workspace = true
+egui-winit.workspace = true
+env_logger.workspace = true
+log.workspace = true
+open.workspace = true
+pollster.workspace = true
+serde.workspace = true
+toml.workspace = true
+wgpu.workspace = true
+winit.workspace = true
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+arboard = "3.7"
+
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
+x11rb.workspace = true
