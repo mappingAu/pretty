@@ -1,0 +1,61 @@
+[patch.crates-io]
+# Local patch: force a real EGL/GLES context when Pretty selects the GLES
+# backend (upstream wgpu prefers desktop OpenGL on EGL platforms).
+wgpu-hal = { path = "vendor/wgpu-hal" }
+
+[workspace]
+members = ["crates/pretty-core", "crates/pretty-renderer", "crates/pretty-app"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+authors = ["Pretty Authors"]
+license = "MIT OR Apache-2.0"
+repository = "https://example.invalid/pretty"
+description = "Pretty — a hardware-accelerated kitty-compatible terminal emulator"
+
+[workspace.dependencies]
+pretty-core = { path = "crates/pretty-core" }
+pretty-renderer = { path = "crates/pretty-renderer" }
+
+alacritty_terminal = { version = "0.26.0", default-features = false }
+base64 = "0.22"
+bytemuck = { version = "1.25", features = ["derive"] }
+crossbeam-channel = "0.5"
+directories = "6.0"
+egui = { version = "0.37", features = ["default_fonts"] }
+egui-wgpu = { version = "0.37", default-features = false, features = ["winit", "x11", "wayland"] }
+egui-winit = "0.37"
+env_logger = "0.11"
+fontdb = "0.24"
+image = { version = "0.25", default-features = false, features = ["png"] }
+log = { version = "0.4", features = ["std"] }
+notify-rust = "4.18"
+open = "5.4"
+pollster = "1.0"
+portable-pty = "0.9"
+raw-window-handle = "0.6"
+rustybuzz = "0.20"
+serde = { version = "1", features = ["derive"] }
+swash = "0.2"
+thiserror = "2"
+toml = "1.1"
+ttf-parser = "0.25"
+wgpu = "30.0"
+winit = "0.30"
+x11rb = { version = "0.13", features = ["allow-unsafe-code"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"
+panic = "abort"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2

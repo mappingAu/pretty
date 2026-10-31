@@ -1,0 +1,8 @@
+/target
+/dist
+/build
+*.log
+docs/screenshots/*.tmp
+/.portable-pretty
+/test-artifacts
+/.pretty-package-binary
