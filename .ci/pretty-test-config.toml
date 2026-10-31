@@ -1,0 +1,29 @@
+renderer = "auto"
+font_family = "JetBrains Mono"
+font_size = 15.0
+line_height = 1.18
+ligatures = true
+font_features = [
+    "liga",
+    "calt",
+]
+opacity = 0.9
+blur = true
+padding = 10.0
+gap = 5.0
+background = "#0d1117"
+foreground = "#d8dee9"
+cursor = "#88c0d0"
+accent = "#7aa2f7"
+selection_bg = "#334b67"
+selection_fg = "#eceff4"
+scrollback = 10000
+vsync = true
+shell = "/bin/bash"
+allow_osc52_paste = true
+window_width = 1280
+window_height = 820
+ui_accent = "#7aa2f7"
+ui_panel_opacity = 0.9
+prefer_x11_for_blur = true
+cursor_blink = true
