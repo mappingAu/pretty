@@ -1,0 +1,32 @@
+[package]
+name = "pretty-renderer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "wgpu rendering abstraction, Vulkan/GLES drivers and text/graphics rendering for Pretty"
+
+[features]
+default = ["vulkan", "gles"]
+vulkan = ["wgpu/vulkan"]
+gles = ["wgpu/gles"]
+metal = []
+dx = []
+
+[dependencies]
+pretty-core.workspace = true
+bytemuck.workspace = true
+egui.workspace = true
+egui-wgpu.workspace = true
+fontdb.workspace = true
+image.workspace = true
+log.workspace = true
+pollster.workspace = true
+rustybuzz.workspace = true
+serde.workspace = true
+swash.workspace = true
+thiserror.workspace = true
+ttf-parser.workspace = true
+wgpu.workspace = true
+winit.workspace = true
