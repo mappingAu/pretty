@@ -1,0 +1,24 @@
+[package]
+name = "pretty-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Terminal state, kitty protocol extensions and PTY session for Pretty"
+
+[dependencies]
+alacritty_terminal.workspace = true
+base64.workspace = true
+crossbeam-channel.workspace = true
+image.workspace = true
+log.workspace = true
+portable-pty.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
+notify-rust.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+winapi-util = "0.1"
