@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Pretty
+GenericName=Terminal Emulator
+Comment=Hardware-accelerated, kitty-compatible terminal emulator
+Exec=pretty
+TryExec=pretty
+Icon=pretty
+Terminal=false
+Categories=System;TerminalEmulator;
+Keywords=terminal;console;kitty;gpu;vulkan;gles;tiling;
+StartupNotify=true
+StartupWMClass=pretty

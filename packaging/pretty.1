@@ -1,0 +1,111 @@
+.\" Pretty terminal emulator manual page
+.TH PRETTY 1 "2026-11-01" "Pretty 0.1.0" "User Commands"
+.SH NAME
+pretty \- hardware accelerated, kitty-compatible terminal emulator
+.SH SYNOPSIS
+.B pretty
+[\fIOPTIONS\fR]
+.SH DESCRIPTION
+.B Pretty
+is a GPU-accelerated terminal emulator implementing the kitty terminal protocol
+and rendering through Vulkan or OpenGL ES 3.0+ using wgpu.  It supports kitty
+graphics, the kitty keyboard protocol, OSC 8 hyperlinks, OSC 52 clipboard,
+desktop notifications, true colour, ligatures, scrollback, split (tiling) panes,
+and compositor blur under KDE/X11.
+.PP
+Metal and Direct3D are reserved interfaces and are not implemented; selecting
+them reports a clear error rather than silently falling back.
+.SH OPTIONS
+.TP
+.BI \-\-renderer " auto|vulkan|gles|metal|dx"
+Select the rendering backend.  The environment variable
+.B PRETTY_RENDERER
+is consulted when the option is absent.
+.TP
+.BI \-\-config " PATH"
+Use an alternate TOML configuration file.
+.TP
+.BI \-\-command " COMMAND"
+Run COMMAND in the terminal instead of the login shell.
+.TP
+.BI \-\-font-size " PX"
+Override the configured font size for this run (not persisted).
+.TP
+.BI \-\-opacity " VALUE"
+Override background opacity for this run (not persisted).
+.TP
+.B \-\-no\-blur
+Disable compositor blur for this run.
+.TP
+.B \-\-fullscreen
+Start fullscreen.
+.TP
+.BI \-\-title " TITLE"
+Set the initial window title.
+.TP
+.BI \-\-benchmark " FRAMES"
+Continuously redraw a full terminal frame for FRAMES frames, print a benchmark
+result and exit.  Useful for validating the 60 fps baseline.
+.TP
+.B \-\-print\-info
+Print the selected backends, adapters, drivers and protocol level, then exit.
+.TP
+.B \-\-version
+Print the version and exit.
+.TP
+.B \-\-help
+Print usage information.
+.SH ENVIRONMENT
+.TP
+.B PRETTY_RENDERER
+Default renderer when no command-line option is supplied.
+.TP
+.B PRETTY_CONFIG
+Alternate configuration path.
+.TP
+.B RUST_LOG
+Rust logging filter (for example \fBinfo\fR or \fBwgpu_hal=debug\fR).
+.TP
+.B TERM
+Set to \fBpretty\fR for child processes.
+.SH FILES
+.TP
+.I ~/.config/pretty/config.toml
+User configuration, editable graphically with Ctrl+, or with an editor.
+.TP
+.I ~/.terminfo/p/pretty
+Terminfo used when the system-wide entry is not installed.
+.SH SHORTCUTS
+.TP
+.B Ctrl+,
+Open or close the graphical settings panel.
+.TP
+.B Ctrl+Shift+E / Ctrl+Shift+O
+Split the focused pane to the right / below.
+.TP
+.B Ctrl+Shift+W
+Close the focused pane.
+.TP
+.B Alt+Arrow
+Move focus to a neighbouring pane.
+.TP
+.B Ctrl+Shift+C / Ctrl+Shift+V
+Copy the selection / paste the clipboard.
+.TP
+.B Shift+PageUp / Shift+PageDown
+Scroll the history by one page.
+.TP
+.B Ctrl+Shift+Q
+Quit Pretty.
+.SH FILES
+The kitty compatibility matrix and test evidence are installed under
+.I /usr/share/doc/pretty.
+.SH EXIT STATUS
+Zero on normal exit; non-zero when the selected renderer or GPU cannot be
+initialised or a mandatory package resource is missing.
+.SH REPORTING BUGS
+Include the output of \fBpretty --print-info\fR, the GPU/driver, and the full
+startup log with RUST_LOG=info.
+.SH SEE ALSO
+.BR kitty (1),
+.BR xterm (1)

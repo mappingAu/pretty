@@ -1,0 +1,16 @@
+Package: pretty-terminal
+Version: 0.1.0
+Section: x11
+Priority: optional
+Architecture: amd64
+Maintainer: Pretty Authors <dev@pretty.local>
+Homepage: https://example.invalid/pretty
+Depends: libc6 (>= 2.35), libgcc-s1, libfontconfig1, libfreetype6, libxkbcommon0, libxkbcommon-x11-0, libwayland-client0, libwayland-cursor0, libwayland-egl1, libx11-6, libx11-xcb1, libxcb1, libxcursor1, libxi6, libxrandr2, libxfixes3, libxext6, libegl1, libvulkan1
+Recommends: fonts-jetbrains-mono, fonts-noto-color-emoji, fonts-noto-cjk
+Installed-Size: 30000
+Description: Hardware accelerated, kitty-compatible terminal emulator
+ Pretty is a GPU accelerated terminal emulator using Vulkan or OpenGL ES 3.0+
+ through wgpu. It implements the kitty graphics protocol, kitty keyboard
+ protocol, OSC 8 hyperlinks, OSC 52 clipboard, desktop notifications, true
+ color, ligatures, scrollback, tiling panes and KDE/X11 compositor blur.
+ Metal and DirectX are reserved interfaces and are not implemented.
