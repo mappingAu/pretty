@@ -1,6 +1,6 @@
 # Pretty
 
-## **Warning**: Part of the code for this project was written by AI (Vibe coding). **Including this README.**
+## **Warning**: Part of the code for this project was written by AI (Vibe coding).
 
 Pretty is a hardware-accelerated terminal emulator written in Rust. It targets
 the **kitty terminal protocol**, renders through **wgpu/Vulkan** or **OpenGL ES
