@@ -21,6 +21,10 @@ WID=""
 PATTERN_PID=""
 export DISPLAY=${DISPLAY:-:0}
 export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
+# Keep the protocol probe deterministic. The host's running Fcitx XIM would
+# otherwise consume synthesized key press/release events during the kitty
+# keyboard CSI-u test; IME has a separate tests/evidence path.
+export XMODIFIERS="@im=none"
 unset WAYLAND_DISPLAY
 export TERMINFO="$ROOT/build/test-terminfo"
 mkdir -p "$TERMINFO"
@@ -195,6 +199,7 @@ if launch vulkan Pretty-Test-Vulkan "python3 $ROOT/assets/demo/feature-demo.py" 
     DISPLAY="$DISPLAY" display -geometry 1600x1000+160+40 "$ART/blur-pattern.png" >/dev/null 2>&1 &
     PATTERN_PID=$!
     sleep 1
+    DISPLAY="$DISPLAY" xdotool windowraise "$WID" >/dev/null 2>&1 || true
     DISPLAY="$DISPLAY" xdotool windowactivate --sync "$WID" >/dev/null 2>&1 || true
     focus_terminal
   fi
@@ -223,7 +228,8 @@ if launch vulkan Pretty-Test-Vulkan "python3 $ROOT/assets/demo/feature-demo.py" 
   fi
   if grep -q 'pane 2 split' "$VLOG"; then pass "tiling split created a second pane"; else fail "tiling split not logged"; fi
   if DISPLAY="$DISPLAY" xprop -id "$WID" _KDE_NET_WM_BLUR_BEHIND_REGION 2>/dev/null | grep -q 'CARDINAL'; then pass "KWin blur region property applied"; else fail "KWin blur region property missing"; fi
-  if DISPLAY="$DISPLAY" xprop -id "$WID" _NET_WM_WINDOW_OPACITY 2>/dev/null | grep -q 'CARDINAL'; then pass "compositor window opacity property applied"; else fail "compositor opacity property missing"; fi
+  if grep -q 'pixel_alpha=true' "$VLOG"; then pass "X11 per-pixel ARGB alpha path used"; else fail "X11 per-pixel alpha path not logged"; fi
+  if DISPLAY="$DISPLAY" xprop -id "$WID" _NET_WM_WINDOW_OPACITY 2>/dev/null | grep -q 'CARDINAL'; then fail "legacy whole-window opacity still present"; else pass "legacy whole-window opacity removed"; fi
   # resize/swapchain recreation
   window_geometry
   DISPLAY="$DISPLAY" xdotool windowsize "$WID" 1040 700

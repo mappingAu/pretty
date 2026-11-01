@@ -330,16 +330,17 @@ The window is created with transparency support. The surface alpha mode is selec
 premultiplied when the surface uses a premultiplied mode. A configurable alpha (default
 `0.88`) makes the desktop visible through the terminal.
 
-On KDE Plasma under X11/XWayland, the app sets
-`_KDE_NET_WM_BLUR_BEHIND_REGION` (a rectangle covering the client area) and
-`_NET_WM_WINDOW_OPACITY` via x11rb (isolated in `pretty-app::platform::x11`).
-KWin then blurs the wallpaper/windows behind the translucent window, which is
-observable in the captured desktop composition. This NVIDIA X11 Vulkan surface
-only exposes `Opaque` composite alpha, so transparency is supplied by the
-compositor window property rather than per-pixel swapchain alpha. The window is
-created with a 32-bit ARGB visual when opacity/blur are requested. Other
-compositors may ignore the properties; Pretty logs the failure and never fakes
-blur in its own renderer.
+On KDE Plasma under X11/XWayland the app sets
+`_KDE_NET_WM_BLUR_BEHIND_REGION` via x11rb and uses a 32-bit ARGB client buffer.
+Although this NVIDIA Vulkan surface reports `Opaque` compositing, the X11 pixmap
+still carries the shader alpha: Pretty clears with alpha 0, draws the terminal
+background with `alpha = config.opacity`, keeps text/images at alpha 1, and
+deletes `_NET_WM_WINDOW_OPACITY` when this `pixel_alpha` path is active. KWin
+therefore blurs a real translucent client buffer rather than applying a separate
+whole-window opacity over an opaque buffer; text stays opaque. This is enabled
+automatically for X11 when opacity < 1 and works for both Vulkan and GLES.
+Other compositors may ignore client alpha/blur; Pretty logs the situation and
+never fakes blur in its own renderer.
 
 ### 4.7 Configuration UI
 

@@ -16,7 +16,7 @@ split panes, scrollback, clipboard integration and desktop notifications.
 | Metal / DirectX | **reserved only** — explicit `UnsupportedBackend` error, never silently selected |
 | kitty graphics | PNG/RGB/RGBA, chunked transfer, placement, delete, query, z-index; animation/file/SHM are not implemented |
 | kitty keyboard | all five progressive-enhancement flags, query/push/pop, tested CSI-u output |
-| Tiling, transparency, blur | working tiling panes; KWin/X11 window opacity + blur-behind |
+| Tiling, transparency, blur | working tiling panes; KWin/X11 per-pixel ARGB alpha + real blur-behind |
 | Packages | deb, rpm and relocatable tar.gz with desktop entry, icon, man page and terminfo |
 
 See [docs/KITTY-COMPAT.md](docs/KITTY-COMPAT.md) for the item-by-item protocol
@@ -59,7 +59,10 @@ matrix, [docs/TEST-REPORT.md](docs/TEST-REPORT.md) for real-hardware evidence an
 - **Animated kitty images** (mpv `--vo=kitty`): opaque auto-id frames that repeat
   at the same anchor replace the previous frame, and all image/GPU caches are
   bounded and evicted. A long video no longer fills the 256-image table.
-- Translucent window with **KWin blur-behind** on KDE/X11; no fake CPU blur.
+- Translucent window with **real KWin blur-behind** on KDE/X11. On X11 the
+  background is rendered as per-pixel ARGB alpha, so KWin blurs the client
+  buffer while terminal text stays fully opaque; no fake CPU blur and no
+  whole-window opacity layer.
 - A customisable egui settings panel (Ctrl+, or the Settings button) covering
   font, colours, opacity, blur, padding, scrollback, tiling gap, vsync and
   backend selection. Only a restart is required to change GPU backend.

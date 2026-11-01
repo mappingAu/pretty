@@ -100,13 +100,14 @@ delivered source and is reproducible by `cargo build --release`.
 are presented and the swapchain is reconfigured on the next resize; timeout or
 occlusion skips the frame; validation errors are reported, not ignored.
 
-On this NVIDIA X11 host the Vulkan Xlib surface exposes only `Opaque`
-compositing. Pretty therefore gets **per-window transparency from the
-compositor** (`_NET_WM_WINDOW_OPACITY`) and requests the blur region with
-`_KDE_NET_WM_BLUR_BEHIND_REGION`. The window is 32-bit ARGB when transparency or
-blur is requested. Native Wayland Vulkan surfaces can report PreMultiplied and
-use per-pixel alpha; the same renderer clears to transparent when the surface
-allows it.
+On this NVIDIA X11 host the Vulkan Xlib surface advertises only `Opaque`
+compositing, but the 32-bit ARGB X11 pixmap still carries the shader alpha.
+Pretty therefore uses **per-pixel client alpha** on X11 when opacity < 1:
+background alpha = configured opacity, text/image alpha = 1, transparent clear.
+It removes `_NET_WM_WINDOW_OPACITY` and keeps
+`_KDE_NET_WM_BLUR_BEHIND_REGION`, so KWin blurs the alpha background while
+foreground text remains opaque. This path works for Vulkan and GLES. Native
+Wayland surfaces use the native PreMultiplied alpha path instead.
 
 ## 4. Pipelines and rendering order
 

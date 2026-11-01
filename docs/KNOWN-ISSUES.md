@@ -42,13 +42,17 @@ renderer or represent a compile-only stub as a supported platform.
    `vendor/wgpu-hal`. This is a deliberate, documented local patch, not a silent
    fallback.
 3. **Compositor blur requires KDE Plasma + X11/XWayland.** Pretty sets
-   `_KDE_NET_WM_BLUR_BEHIND_REGION` and `_NET_WM_WINDOW_OPACITY`. Other
-   compositors may ignore the properties; transparency then may degrade to
-   opaque. The failure is logged.
-4. **Vulkan X11 surface reports Opaque compositing on this driver.** Transparency
-   is achieved by compositor window opacity, so the whole window (text included)
-   is composited at that opacity rather than per-pixel alpha. Native Wayland may
-   use per-pixel alpha.
+   `_KDE_NET_WM_BLUR_BEHIND_REGION` and uses a 32-bit ARGB client buffer with
+   per-pixel alpha; it removes `_NET_WM_WINDOW_OPACITY` so the alpha and blur
+   compose as one background layer. Other compositors may ignore the region or
+   client alpha; transparency may then degrade to opaque. The situation is
+   logged.
+4. **Vulkan X11 surface still reports Opaque compositing on this driver.** Pretty
+   works around that by rendering an ARGB client buffer with per-pixel alpha on
+   X11 (`PRETTY_PIXEL_ALPHA` is enabled automatically when opacity < 1); the
+   whole-window opacity property is then removed so KWin can blur the alpha
+   background and keep text opaque. A compositor that ignores client alpha may
+   fall back to an opaque appearance; KWin 6 / XWayland is verified.
 5. **Metal and Direct3D are not implemented.** The `metal`/`dx` features compile
    the reserved driver skeleton; selecting them fails with a clear
    `UnsupportedBackend` error.

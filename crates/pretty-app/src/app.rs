@@ -230,6 +230,25 @@ impl PrettyApp {
         self.scale_factor = window.scale_factor();
         self.egui_ctx.set_pixels_per_point(self.scale_factor as f32);
         let theme = self.config.theme();
+        // On X11 the compositor blur effect only blurs a client buffer that
+        // actually has alpha. Using _NET_WM_WINDOW_OPACITY alone makes the
+        // whole window translucent but leaves the desktop unblurred. Prefer
+        // per-pixel alpha when the X11 path is in use and transparency is
+        // requested; KWin then blurs behind the background while text stays
+        // opaque. Wayland keeps its native alpha path.
+        #[cfg(target_os = "linux")]
+        {
+            let x11 = std::env::var_os("DISPLAY").is_some()
+                && std::env::var_os("WAYLAND_DISPLAY").is_none();
+            if x11 && self.config.opacity < 0.999 {
+                std::env::set_var("PRETTY_PIXEL_ALPHA", "1");
+                log::info!(
+                    "X11 compositor: per-pixel alpha enabled (opacity {:.2})",
+                    self.config.opacity
+                );
+            }
+        }
+
         let renderer = match Renderer::new(
             window.clone(),
             event_loop.owned_display_handle(),

@@ -54,7 +54,8 @@ pub fn apply_compositor_effects(window: &Window, blur: bool, opacity: f32) -> Re
     } else {
         conn.delete_property(xid, atom).map_err(|e| e.to_string())?;
     }
-    if opacity < 0.999 {
+    let pixel_alpha = std::env::var_os("PRETTY_PIXEL_ALPHA").is_some();
+    if opacity < 0.999 && !pixel_alpha {
         // The Vulkan Xlib swapchain only exposes an opaque composite mode on
         // this driver. The compositor applies whole-window alpha instead; KWin
         // also uses this alpha to blend the blur region.
@@ -77,9 +78,10 @@ pub fn apply_compositor_effects(window: &Window, blur: bool, opacity: f32) -> Re
         .reply()
         .map_err(|e| e.to_string())?;
     log::info!(
-        "KDE compositor effects: xid=0x{xid:x} blur={} opacity={:.2} blur_region={} values",
+        "KDE compositor effects: xid=0x{xid:x} blur={} opacity={:.2} pixel_alpha={} blur_region={} values",
         blur,
         opacity,
+        pixel_alpha,
         check.value_len
     );
     Ok(())

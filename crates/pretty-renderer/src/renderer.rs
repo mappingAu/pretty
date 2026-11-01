@@ -70,7 +70,11 @@ impl Renderer {
             allow_software,
         )?;
         let mut theme = theme;
-        if !gpu.info.transparent {
+        // Experimental X11 per-pixel-alpha path: with an ARGB visual, KWin can
+        // blur a translucent client buffer and keep text opaque. The opaque
+        // composite mode is a Vulkan hint; the X11 pixmap still carries alpha.
+        let pixel_alpha = std::env::var_os("PRETTY_PIXEL_ALPHA").is_some();
+        if !gpu.info.transparent && !pixel_alpha {
             // The compositor applies window opacity on X11; avoid applying the
             // configured opacity twice in the opaque swapchain.
             theme.opacity = 1.0;
@@ -96,7 +100,7 @@ impl Renderer {
             format,
             egui_wgpu::RendererOptions::default(),
         );
-        let clear = if gpu.info.transparent {
+        let clear = if gpu.info.transparent || pixel_alpha {
             wgpu::Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }
         } else {
             let c = theme.background;
@@ -140,11 +144,12 @@ impl Renderer {
     pub fn set_theme(&mut self, theme: Theme) -> Result<(), RendererError> {
         let rebuild = self.text.needs_rebuild(&theme, self.scale_factor);
         let mut theme = theme;
-        if !self.gpu.info.transparent {
+        let pixel_alpha = std::env::var_os("PRETTY_PIXEL_ALPHA").is_some();
+        if !self.gpu.info.transparent && !pixel_alpha {
             theme.opacity = 1.0;
         }
         let bg = theme.background;
-        self.clear = if self.gpu.info.transparent {
+        self.clear = if self.gpu.info.transparent || pixel_alpha {
             wgpu::Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }
         } else {
             wgpu::Color {
