@@ -4,6 +4,7 @@ use egui::Color32;
 use pretty_renderer::{CellMetrics, GpuInfo};
 
 use crate::config::Config;
+use crate::i18n::{tr, Lang};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Tab {
@@ -49,6 +50,7 @@ pub fn show(
     state: &mut SettingsState,
     info: &RuntimeInfo<'_>,
     version: &str,
+    lang: Lang,
 ) -> bool {
     apply_style(ctx, &state.draft);
     let mut changed = false;
@@ -58,12 +60,12 @@ pub fn show(
             .order(egui::Order::Foreground)
             .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-12.0, 10.0))
             .show(ctx, |ui| {
-                let button = egui::Button::new(egui::RichText::new("Settings").size(13.0))
+                let button = egui::Button::new(egui::RichText::new(tr(lang, "Settings")).size(13.0))
+                    .min_size(egui::vec2(104.0, 30.0))
                     .fill(Color32::from_rgba_unmultiplied(20, 26, 36, 230))
                     .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(90, 110, 140)));
-                if ui.add(button).on_hover_text("Open Pretty settings (Ctrl+,)").clicked() {
+                if ui.add(button).on_hover_text(tr(lang, "Open Pretty settings (Ctrl+,)")).clicked() {
                     state.open = true;
-                    state.draft = state.draft.clone();
                 }
             });
     }
@@ -78,7 +80,7 @@ pub fn show(
         .stroke(egui::Stroke::new(1.0, Color32::from_rgb(54, 70, 94)))
         .corner_radius(egui::CornerRadius::same(9))
         .inner_margin(egui::Margin::same(12));
-    egui::Window::new("Pretty Settings")
+    egui::Window::new(tr(lang, "Pretty Settings"))
         .open(&mut open)
         .frame(frame)
         .collapsible(false)
@@ -88,28 +90,28 @@ pub fn show(
         .min_width(480.0)
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut tab, Tab::General, "General");
-                ui.selectable_value(&mut tab, Tab::Appearance, "Appearance");
-                ui.selectable_value(&mut tab, Tab::Rendering, "Rendering");
-                ui.selectable_value(&mut tab, Tab::Keyboard, "Keyboard");
-                ui.selectable_value(&mut tab, Tab::About, "About");
+                ui.selectable_value(&mut tab, Tab::General, tr(lang, "General"));
+                ui.selectable_value(&mut tab, Tab::Appearance, tr(lang, "Appearance"));
+                ui.selectable_value(&mut tab, Tab::Rendering, tr(lang, "Rendering"));
+                ui.selectable_value(&mut tab, Tab::Keyboard, tr(lang, "Keyboard"));
+                ui.selectable_value(&mut tab, Tab::About, tr(lang, "About"));
             });
             ui.separator();
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 match tab {
-                    Tab::General => general(ui, &mut draft, info, &mut changed),
-                    Tab::Appearance => appearance(ui, &mut draft, &mut changed),
-                    Tab::Rendering => rendering(ui, &mut draft, info, &mut changed),
-                    Tab::Keyboard => keyboard(ui, info),
-                    Tab::About => about(ui, version, info),
+                    Tab::General => general(ui, &mut draft, info, lang, &mut changed),
+                    Tab::Appearance => appearance(ui, &mut draft, lang, &mut changed),
+                    Tab::Rendering => rendering(ui, &mut draft, info, lang, &mut changed),
+                    Tab::Keyboard => keyboard(ui, info, lang),
+                    Tab::About => about(ui, version, info, lang),
                 }
             });
             ui.separator();
             ui.horizontal(|ui| {
-                if ui.button("Save now").clicked() {
+                if ui.button(tr(lang, "Save now")).clicked() {
                     changed = true;
                 }
-                ui.label(egui::RichText::new("Changes are applied live and saved automatically.").small());
+                ui.label(egui::RichText::new(tr(lang, "Changes are applied live and saved automatically.")).small());
             });
         });
     state.open = open;
@@ -124,34 +126,55 @@ fn general(
     ui: &mut egui::Ui,
     cfg: &mut Config,
     info: &RuntimeInfo<'_>,
+    lang: Lang,
     changed: &mut bool,
 ) {
     egui::Grid::new("general-grid").num_columns(2).spacing([14.0, 10.0]).show(ui, |ui| {
-        ui.label("Font family");
+        ui.label(tr(lang, "Language"));
+        egui::ComboBox::from_id_salt("language-choice")
+            .selected_text(match cfg.language.as_str() {
+                "en" => Lang::English.native_name(),
+                "zh-CN" => Lang::Chinese.native_name(),
+                _ => tr(lang, "Automatic (system)"),
+            })
+            .show_ui(ui, |ui| {
+                if ui.selectable_value(&mut cfg.language, "auto".to_owned(), tr(lang, "Automatic (system)")).changed() {
+                    *changed = true;
+                }
+                if ui.selectable_value(&mut cfg.language, "en".to_owned(), Lang::English.native_name()).changed() {
+                    *changed = true;
+                }
+                if ui.selectable_value(&mut cfg.language, "zh-CN".to_owned(), Lang::Chinese.native_name()).changed() {
+                    *changed = true;
+                }
+            });
+        ui.end_row();
+
+        ui.label(tr(lang, "Font family"));
         if ui.text_edit_singleline(&mut cfg.font_family).changed() {
             *changed = true;
         }
         ui.end_row();
 
-        ui.label("Font size");
+        ui.label(tr(lang, "Font size"));
         if ui.add(egui::Slider::new(&mut cfg.font_size, 8.0..=32.0).suffix(" px")).changed() {
             *changed = true;
         }
         ui.end_row();
 
-        ui.label("Line height");
+        ui.label(tr(lang, "Line height"));
         if ui.add(egui::Slider::new(&mut cfg.line_height, 0.9..=1.6)).changed() {
             *changed = true;
         }
         ui.end_row();
 
-        ui.label("Ligatures");
-        if ui.checkbox(&mut cfg.ligatures, "Enable programming ligatures (liga/calt)").changed() {
+        ui.label(tr(lang, "Ligatures"));
+        if ui.checkbox(&mut cfg.ligatures, tr(lang, "Enable programming ligatures (liga/calt)")).changed() {
             *changed = true;
         }
         ui.end_row();
 
-        ui.label("OpenType features");
+        ui.label(tr(lang, "OpenType features"));
         let mut features = cfg.font_features.join(", ");
         if ui.text_edit_singleline(&mut features).changed() {
             cfg.font_features = features
@@ -163,20 +186,20 @@ fn general(
         }
         ui.end_row();
 
-        ui.label("Scrollback");
+        ui.label(tr(lang, "Scrollback"));
         if ui.add(egui::Slider::new(&mut cfg.scrollback, 0..=200_000).suffix(" lines")).changed() {
             *changed = true;
         }
         ui.end_row();
 
-        ui.label("Shell");
+        ui.label(tr(lang, "Shell"));
         if ui.text_edit_singleline(&mut cfg.shell).changed() {
             *changed = true;
         }
         ui.end_row();
 
-        ui.label("Cursor");
-        if ui.checkbox(&mut cfg.cursor_blink, "Blinking cursor").changed() {
+        ui.label(tr(lang, "Cursor"));
+        if ui.checkbox(&mut cfg.cursor_blink, tr(lang, "Blinking cursor")).changed() {
             *changed = true;
         }
         ui.end_row();
@@ -184,7 +207,8 @@ fn general(
     ui.add_space(6.0);
     ui.label(
         egui::RichText::new(format!(
-            "Cell grid: {:.0}×{:.0}px  ·  current pane {}×{} cells",
+            "{}: {:.0}×{:.0}px  ·  {}×{} cells",
+            tr(lang, "Cell grid"),
             info.metrics.cell_w,
             info.metrics.cell_h,
             (ui.available_width() / info.metrics.cell_w) as u32,
@@ -195,66 +219,66 @@ fn general(
     );
 }
 
-fn appearance(ui: &mut egui::Ui, cfg: &mut Config, changed: &mut bool) {
+fn appearance(ui: &mut egui::Ui, cfg: &mut Config, lang: Lang, changed: &mut bool) {
     egui::Grid::new("appearance-grid").num_columns(2).spacing([14.0, 10.0]).show(ui, |ui| {
-        ui.label("Opacity");
+        ui.label(tr(lang, "Opacity"));
         if ui.add(egui::Slider::new(&mut cfg.opacity, 0.25..=1.0).fixed_decimals(2)).changed() {
             *changed = true;
         }
         ui.end_row();
 
-        ui.label("Compositor blur");
-        if ui.checkbox(&mut cfg.blur, "Blur desktop behind the window (KWin/X11)").changed() {
+        ui.label(tr(lang, "Compositor blur"));
+        if ui.checkbox(&mut cfg.blur, tr(lang, "Blur desktop behind the window (KWin/X11)")).changed() {
             *changed = true;
         }
         ui.end_row();
 
-        ui.label("Padding");
+        ui.label(tr(lang, "Padding"));
         if ui.add(egui::Slider::new(&mut cfg.padding, 0.0..=30.0).suffix(" px")).changed() {
             *changed = true;
         }
         ui.end_row();
 
-        ui.label("Tiling gap");
+        ui.label(tr(lang, "Tiling gap"));
         if ui.add(egui::Slider::new(&mut cfg.gap, 0.0..=16.0).suffix(" px")).changed() {
             *changed = true;
         }
         ui.end_row();
 
-        ui.label("Background");
+        ui.label(tr(lang, "Background"));
         *changed |= color_row(ui, &mut cfg.background);
         ui.end_row();
-        ui.label("Foreground");
+        ui.label(tr(lang, "Foreground"));
         *changed |= color_row(ui, &mut cfg.foreground);
         ui.end_row();
-        ui.label("Cursor");
+        ui.label(tr(lang, "Cursor"));
         *changed |= color_row(ui, &mut cfg.cursor);
         ui.end_row();
-        ui.label("Accent");
+        ui.label(tr(lang, "Accent"));
         *changed |= color_row(ui, &mut cfg.accent);
         ui.end_row();
-        ui.label("Selection background");
+        ui.label(tr(lang, "Selection background"));
         *changed |= color_row(ui, &mut cfg.selection_bg);
         ui.end_row();
-        ui.label("Selection foreground");
+        ui.label(tr(lang, "Selection foreground"));
         *changed |= color_row(ui, &mut cfg.selection_fg);
         ui.end_row();
     });
     ui.separator();
-    ui.heading("Configuration UI");
-    ui.label("The settings overlay is themed separately and can be customised:");
+    ui.heading(tr(lang, "Configuration UI"));
+    ui.label(tr(lang, "The settings overlay is themed separately and can be customised:"));
     egui::Grid::new("ui-grid").num_columns(2).spacing([14.0, 10.0]).show(ui, |ui| {
-        ui.label("UI accent");
+        ui.label(tr(lang, "UI accent"));
         *changed |= color_row(ui, &mut cfg.ui_accent);
         ui.end_row();
-        ui.label("UI panel opacity");
+        ui.label(tr(lang, "UI panel opacity"));
         if ui.add(egui::Slider::new(&mut cfg.ui_panel_opacity, 0.5..=1.0)).changed() {
             *changed = true;
         }
         ui.end_row();
     });
     ui.add_space(4.0);
-    if ui.checkbox(&mut cfg.prefer_x11_for_blur, "Prefer X11/XWayland for compositor blur (restart required)").changed() {
+    if ui.checkbox(&mut cfg.prefer_x11_for_blur, tr(lang, "Prefer X11/XWayland for compositor blur (restart required)")).changed() {
         *changed = true;
     }
 }
@@ -263,10 +287,11 @@ fn rendering(
     ui: &mut egui::Ui,
     cfg: &mut Config,
     info: &RuntimeInfo<'_>,
+    lang: Lang,
     changed: &mut bool,
 ) {
     ui.horizontal(|ui| {
-        ui.label("Backend");
+        ui.label(tr(lang, "Backend"));
         egui::ComboBox::from_id_salt("renderer-choice")
             .selected_text(cfg.renderer.clone())
             .show_ui(ui, |ui| {
@@ -280,40 +305,40 @@ fn rendering(
             });
     });
     ui.label(
-        egui::RichText::new("Backend changes take effect after restarting Pretty.")
+        egui::RichText::new(tr(lang, "Backend changes take effect after restarting Pretty."))
             .small()
             .weak(),
     );
-    if ui.checkbox(&mut cfg.vsync, "Vertical sync (FIFO)").changed() {
+    if ui.checkbox(&mut cfg.vsync, tr(lang, "Vertical sync (FIFO)")).changed() {
         *changed = true;
     }
     ui.separator();
     egui::Grid::new("gpu-grid").num_columns(2).spacing([14.0, 6.0]).show(ui, |ui| {
-        ui.label("GPU");
+        ui.label(tr(lang, "GPU"));
         ui.label(format!("{} ({:?})", info.gpu.adapter.name, info.gpu.adapter.device_type));
         ui.end_row();
-        ui.label("Driver");
+        ui.label(tr(lang, "Driver"));
         ui.label(format!("{} {}", info.gpu.adapter.driver, info.gpu.adapter.driver_info));
         ui.end_row();
-        ui.label("wgpu backend");
+        ui.label(tr(lang, "wgpu backend"));
         ui.label(format!("{:?}  ·  {:?}", info.gpu.wgpu_backend, info.gpu.selected));
         ui.end_row();
-        ui.label("Surface");
+        ui.label(tr(lang, "Surface"));
         ui.label(format!(
             "{:?}  ·  alpha {:?}  ·  {:?}",
             info.gpu.surface_format, info.gpu.alpha_mode, info.gpu.present_mode
         ));
         ui.end_row();
-        ui.label("Max texture");
+        ui.label(tr(lang, "Max texture"));
         ui.label(format!("{} px", info.gpu.max_texture_dimension));
         ui.end_row();
-        ui.label("Kitty keyboard flags");
+        ui.label(tr(lang, "Kitty keyboard flags"));
         ui.label(format!("{} (0b{:05b})", info.kitty_flags, info.kitty_flags));
         ui.end_row();
-        ui.label("Terminal modes");
+        ui.label(tr(lang, "Terminal modes"));
         ui.label(&info.mode);
         ui.end_row();
-        ui.label("Font");
+        ui.label(tr(lang, "Font"));
         ui.label(format!("{} @ {:.0}px cells", info.font_family, info.metrics.cell_w));
         ui.end_row();
     });
@@ -322,19 +347,19 @@ fn rendering(
         ui.colored_label(egui::Color32::from_rgb(240, 190, 90), note);
     }
     ui.add_space(8.0);
-    ui.label("Vulkan and OpenGL ES 3.0+ are implemented. Metal and Direct3D are reserved interface stubs and are never silently selected.");
+    ui.label(tr(lang, "Vulkan and OpenGL ES 3.0+ are implemented. Metal and Direct3D are reserved interface stubs and are never silently selected."));
 }
 
-fn keyboard(ui: &mut egui::Ui, info: &RuntimeInfo<'_>) {
-    ui.heading("Kitty keyboard protocol");
-    ui.label(format!("Negotiated flags: 0b{:05b} ({})", info.kitty_flags, info.kitty_flags));
-    ui.label("  bit 1: disambiguate escape codes");
-    ui.label("  bit 2: report event types (repeat/release)");
-    ui.label("  bit 3: report alternate keys");
-    ui.label("  bit 4: report all keys as escape codes");
-    ui.label("  bit 5: report associated text");
+fn keyboard(ui: &mut egui::Ui, info: &RuntimeInfo<'_>, lang: Lang) {
+    ui.heading(tr(lang, "Kitty keyboard protocol"));
+    ui.label(format!("{}: 0b{:05b} ({})", tr(lang, "Negotiated flags"), info.kitty_flags, info.kitty_flags));
+    ui.label(format!("  {}", tr(lang, "bit 1: disambiguate escape codes")));
+    ui.label(format!("  {}", tr(lang, "bit 2: report event types (repeat/release)")));
+    ui.label(format!("  {}", tr(lang, "bit 3: report alternate keys")));
+    ui.label(format!("  {}", tr(lang, "bit 4: report all keys as escape codes")));
+    ui.label(format!("  {}", tr(lang, "bit 5: report associated text")));
     ui.add_space(10.0);
-    ui.heading("Pretty shortcuts");
+    ui.heading(tr(lang, "Pretty shortcuts"));
     for (keys, action) in [
         ("Ctrl+,", "Open/close this settings panel"),
         ("Ctrl+Shift+E", "Split focused pane to the right"),
@@ -350,33 +375,33 @@ fn keyboard(ui: &mut egui::Ui, info: &RuntimeInfo<'_>) {
     ] {
         ui.horizontal(|ui| {
             ui.monospace(format!("{keys:28}"));
-            ui.label(action);
+            ui.label(tr(lang, action));
         });
     }
     ui.add_space(8.0);
-    ui.label("The terminal pass-through uses kitty CSI-u encoding when an application enables the protocol; otherwise it emits xterm-compatible sequences.");
+    ui.label(tr(lang, "The terminal pass-through uses kitty CSI-u encoding when an application enables the protocol; otherwise it emits xterm-compatible sequences."));
 }
 
-fn about(ui: &mut egui::Ui, version: &str, info: &RuntimeInfo<'_>) {
+fn about(ui: &mut egui::Ui, version: &str, info: &RuntimeInfo<'_>, lang: Lang) {
     ui.heading(format!("Pretty {version}"));
-    ui.label("A hardware-accelerated terminal emulator with kitty protocol support, Vulkan and GLES backends, tiling panes and compositor blur.");
+    ui.label(tr(lang, "A hardware-accelerated terminal emulator with kitty protocol support, Vulkan and GLES backends, tiling panes and compositor blur."));
     ui.add_space(8.0);
     egui::Grid::new("about-grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
-        ui.label("Config");
+        ui.label(tr(lang, "Config"));
         ui.label(&info.config_path);
         ui.end_row();
-        ui.label("GPU");
+        ui.label(tr(lang, "GPU"));
         ui.label(&info.gpu.adapter.name);
         ui.end_row();
-        ui.label("Backend");
+        ui.label(tr(lang, "Backend"));
         ui.label(format!("{:?}", info.gpu.wgpu_backend));
         ui.end_row();
-        ui.label("License");
+        ui.label(tr(lang, "License"));
         ui.label("MIT OR Apache-2.0; bundled fonts under OFL-1.1");
         ui.end_row();
     });
     ui.add_space(8.0);
-    ui.label("Documentation: docs/KITTY-COMPAT.md, docs/ARCHITECTURE.md, docs/RENDERER.md, docs/TEST-REPORT.md");
+    ui.label(format!("{}: docs/KITTY-COMPAT.md, docs/ARCHITECTURE.md, docs/RENDERER.md, docs/TEST-REPORT.md", tr(lang, "Documentation")));
     ui.label("kitty protocol documentation: https://sw.kovidgoyal.net/kitty/");
 }
 

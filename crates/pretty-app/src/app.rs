@@ -14,7 +14,9 @@ use pretty_core::{
 use pretty_renderer::{PaneDraw, RenderOutcome, Renderer, RendererKind, UiPaint};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
-use winit::event::{ElementState, Ime, MouseButton as WinitMouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{
+    ElementState, Ime, MouseButton as WinitMouseButton, MouseScrollDelta, TouchPhase, WindowEvent,
+};
 use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 use winit::keyboard::{Key as WinitKey, ModifiersState, NamedKey as WinitNamedKey};
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
@@ -22,6 +24,8 @@ use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 use winit::window::{Fullscreen, Window, WindowId};
 
 use crate::config::Config;
+use crate::i18n::{tr, Lang};
+use crate::menu::{self, ContextAction};
 use crate::platform;
 use crate::settings::{self, RuntimeInfo, SettingsState};
 
@@ -71,6 +75,19 @@ impl Default for MouseState {
     }
 }
 
+#[derive(Clone, Debug)]
+struct TouchGesture {
+    id: u64,
+    start: PhysicalPosition<f64>,
+    last: PhysicalPosition<f64>,
+    pane: PaneId,
+    row: usize,
+    col: usize,
+    moved: bool,
+    mouse: bool,
+    selecting: bool,
+}
+
 pub struct PrettyApp {
     config: Config,
     options: AppOptions,
@@ -102,6 +119,16 @@ pub struct PrettyApp {
     cursor_logged: bool,
     last_cursor_shape: Option<pretty_core::CursorShape>,
     benchmark: Option<Benchmark>,
+    lang: Lang,
+    context_menu: Option<egui::Pos2>,
+    exit_requested: bool,
+    drop_hover: Option<PathBuf>,
+    ime_preedit: String,
+    ime_cursor: Option<egui::Pos2>,
+    touch_positions: HashMap<u64, PhysicalPosition<f64>>,
+    touch_scroll_y: Option<f64>,
+    touch_scroll_pane: Option<PaneId>,
+    touch_gesture: Option<TouchGesture>,
 }
 
 struct Benchmark {
@@ -122,13 +149,18 @@ impl PrettyApp {
             last: Instant::now(),
             intervals: Vec::new(),
         });
+        let lang = Lang::from_setting(&config.language);
         Self {
             config,
             options,
             proxy,
             window: None,
             renderer: None,
-            egui_ctx: egui::Context::default(),
+            egui_ctx: {
+                let ctx = egui::Context::default();
+                install_ui_font(&ctx);
+                ctx
+            },
             egui_state: None,
             settings,
             panes: HashMap::new(),
@@ -153,6 +185,16 @@ impl PrettyApp {
             cursor_logged: false,
             last_cursor_shape: None,
             benchmark,
+            lang,
+            context_menu: None,
+            exit_requested: false,
+            drop_hover: None,
+            ime_preedit: String::new(),
+            ime_cursor: None,
+            touch_positions: HashMap::new(),
+            touch_scroll_y: None,
+            touch_scroll_pane: None,
+            touch_gesture: None,
         }
     }
 
@@ -419,6 +461,7 @@ impl PrettyApp {
             pane.term.scroll_to_bottom();
         }
         self.blink_on = true;
+        self.last_blink = Instant::now() + Duration::from_millis(530);
     }
 
     #[cfg(not(target_os = "android"))]
@@ -474,6 +517,10 @@ impl PrettyApp {
 
     fn paste_clipboard(&mut self) {
         let Ok(text) = self.clipboard_get() else { return };
+        // File managers put `file:///...` URIs on the clipboard rather than a
+        // shell-ready path. Convert those to quoted local paths so pasting a
+        // file behaves like dropping one.
+        let text = file_uris_to_shell_paths(&text).unwrap_or(text);
         let mode = self.panes.get(&self.focused).map(|p| p.term.mode()).unwrap_or_default();
         let bytes = encode_paste(mode, &text);
         self.write_to_focused(&bytes);
@@ -614,6 +661,7 @@ impl PrettyApp {
 
     fn config_changed(&mut self) {
         self.config.validate();
+        self.lang = Lang::from_setting(&self.config.language);
         if let Some(renderer) = self.renderer.as_mut() {
             if let Err(e) = renderer.set_theme(self.config.theme()) {
                 log::error!("failed to apply theme: {e}");
@@ -762,6 +810,7 @@ impl PrettyApp {
             }
         }
         self.blink_on = true;
+        self.last_blink = Instant::now() + Duration::from_millis(530);
         self.handle_terminal_events(id);
         if let Some(w) = &self.window {
             w.request_redraw();
@@ -854,6 +903,7 @@ impl PrettyApp {
                 }
                 TerminalEvent::CursorBlinkingChange => {
                     self.blink_on = true;
+                    self.last_blink = Instant::now() + Duration::from_millis(530);
                 }
                 TerminalEvent::Wakeup => {}
                 TerminalEvent::Exit => self.close_pane(id),
@@ -947,7 +997,18 @@ impl PrettyApp {
             }
             return;
         };
+        log::debug!(
+            "mouse input state={:?} button={:?} at {:?} consumed={} menu={:?}",
+            state, button, pos, egui_consumed, self.context_menu
+        );
         if egui_consumed || self.settings.open {
+            return;
+        }
+        if self.context_menu.is_some() && state == ElementState::Pressed {
+            self.context_menu = None;
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
             return;
         }
         let previous_focus = self.focused;
@@ -957,6 +1018,23 @@ impl PrettyApp {
         }
         let Some(button) = map_mouse_button(button) else { return };
         let shift = self.modifiers.shift_key();
+        let mode = self.panes.get(&pane_id).map(|p| p.term.mode()).unwrap_or_default();
+        if state == ElementState::Pressed
+            && button == pretty_core::MouseButton::Right
+            && (shift || !mode.intersects(TermMode::MOUSE_MODE))
+        {
+            let scale = self.scale_factor.max(1.0) as f32;
+            self.context_menu = Some(egui::pos2(
+                (pos.x / scale as f64) as f32,
+                (pos.y / scale as f64) as f32,
+            ));
+            log::info!("context menu requested at {:?}", self.context_menu);
+            self.mouse.button = None;
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+            return;
+        }
         if state == ElementState::Pressed
             && button == pretty_core::MouseButton::Left
             && self.modifiers.control_key()
@@ -1015,7 +1093,7 @@ impl PrettyApp {
 
     fn process_cursor_moved(&mut self, pos: PhysicalPosition<f64>, egui_consumed: bool) {
         self.mouse.position = Some(pos);
-        if self.settings.open || egui_consumed {
+        if self.settings.open || self.context_menu.is_some() || egui_consumed {
             return;
         }
         let Some((pane_id, col, row)) = self.pane_at(pos.x, pos.y) else { return };
@@ -1058,7 +1136,7 @@ impl PrettyApp {
     }
 
     fn process_wheel(&mut self, delta: MouseScrollDelta, egui_consumed: bool) {
-        if self.settings.open || egui_consumed {
+        if self.settings.open || self.context_menu.is_some() || egui_consumed {
             return;
         }
         let Some(pos) = self.mouse.position else { return };
@@ -1102,6 +1180,267 @@ impl PrettyApp {
         }
     }
 
+    fn process_ime(&mut self, ime: Ime, egui_consumed: bool) {
+        match ime {
+            Ime::Commit(text) => {
+                log::debug!("IME commit: {} bytes", text.len());
+                self.ime_preedit.clear();
+                if !self.settings.open && self.context_menu.is_none() && !egui_consumed {
+                    self.write_to_focused(text.as_bytes());
+                }
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
+            Ime::Preedit(text, _range) => {
+                log::debug!("IME preedit: {} bytes", text.len());
+                if !self.settings.open && !egui_consumed {
+                    self.ime_preedit = text;
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                }
+            }
+            Ime::Enabled => log::info!("IME enabled"),
+            Ime::Disabled => {
+                self.ime_preedit.clear();
+                log::info!("IME disabled");
+            }
+        }
+    }
+
+    fn process_touch(&mut self, touch: winit::event::Touch, egui_consumed: bool) {
+        let id = touch.id;
+        let loc = touch.location;
+        match touch.phase {
+            TouchPhase::Started => {
+                log::debug!("touch start id={id} at {loc:?}");
+                self.touch_positions.insert(id, loc);
+                if self.touch_positions.len() >= 2 {
+                    self.cancel_touch_gesture();
+                    let (ax, ay) = self.touch_centroid();
+                    if let Some((pane, ..)) = self.pane_at(ax, ay) {
+                        self.touch_scroll_pane = Some(pane);
+                        self.touch_scroll_y = Some(ay);
+                    }
+                    return;
+                }
+                if self.settings.open || self.context_menu.is_some() || egui_consumed {
+                    return;
+                }
+                let Some((pane_id, col, row)) = self.pane_at(loc.x, loc.y) else { return };
+                self.focused = pane_id;
+                self.mouse.position = Some(loc);
+                let mode = self.panes.get(&pane_id).map(|p| p.term.mode()).unwrap_or_default();
+                let mouse = mode.intersects(TermMode::MOUSE_MODE);
+                if mouse {
+                    if let Some(bytes) = encode_mouse(mode, pretty_core::MouseButton::Left, MouseEventKind::Press, col, row, self.core_modifiers()) {
+                        if let Some(pane) = self.panes.get_mut(&pane_id) {
+                            let _ = pane.pty.write(&bytes);
+                        }
+                    }
+                    self.mouse.button = Some(pretty_core::MouseButton::Left);
+                    self.mouse.last_cell = Some((pane_id, col, row));
+                } else if let Some(pane) = self.panes.get_mut(&pane_id) {
+                    pane.term.start_selection(row, col);
+                }
+                self.touch_gesture = Some(TouchGesture {
+                    id,
+                    start: loc,
+                    last: loc,
+                    pane: pane_id,
+                    row,
+                    col,
+                    moved: false,
+                    mouse,
+                    selecting: !mouse,
+                });
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
+            TouchPhase::Moved => {
+                self.touch_positions.insert(id, loc);
+                if self.touch_positions.len() >= 2 {
+                    let (_, ay) = self.touch_centroid();
+                    if let Some(last) = self.touch_scroll_y {
+                        let dy = ay - last;
+                        let cell_h = self.renderer.as_ref().map(|r| r.cell_metrics().cell_h as f64).unwrap_or(18.0);
+                        let lines = (dy / cell_h).trunc() as i32;
+                        if lines != 0 {
+                            if let Some(pane) = self.touch_scroll_pane.and_then(|p| self.panes.get_mut(&p)) {
+                                pane.term.scroll(lines);
+                            }
+                            self.touch_scroll_y = Some(ay - (dy % cell_h));
+                            if let Some(w) = &self.window {
+                                w.request_redraw();
+                            }
+                        } else {
+                            self.touch_scroll_y = Some(ay);
+                        }
+                    } else {
+                        self.touch_scroll_y = Some(ay);
+                    }
+                    return;
+                }
+                let Some(mut g) = self.touch_gesture.take() else { return };
+                if g.id != id {
+                    self.touch_gesture = Some(g);
+                    return;
+                }
+                let dx = loc.x - g.start.x;
+                let dy = loc.y - g.start.y;
+                if !g.moved && dx * dx + dy * dy > 36.0 {
+                    g.moved = true;
+                }
+                g.last = loc;
+                if g.moved {
+                    if let Some((_, col, row)) = self.pane_at(loc.x, loc.y) {
+                        g.col = col;
+                        g.row = row;
+                        let mode = self.panes.get(&g.pane).map(|p| p.term.mode()).unwrap_or_default();
+                        if g.mouse {
+                            if mode.contains(TermMode::MOUSE_DRAG) || mode.contains(TermMode::MOUSE_MOTION) {
+                                if self.mouse.last_cell != Some((g.pane, col, row)) {
+                                    self.mouse.last_cell = Some((g.pane, col, row));
+                                    if let Some(bytes) = encode_mouse(mode, pretty_core::MouseButton::Left, MouseEventKind::Motion, col, row, self.core_modifiers()) {
+                                        if let Some(pane) = self.panes.get_mut(&g.pane) {
+                                            let _ = pane.pty.write(&bytes);
+                                        }
+                                    }
+                                }
+                            }
+                        } else if let Some(pane) = self.panes.get_mut(&g.pane) {
+                            pane.term.update_selection(row, col);
+                        }
+                    }
+                }
+                self.touch_gesture = Some(g);
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
+            TouchPhase::Ended | TouchPhase::Cancelled => {
+                log::debug!("touch end id={id} at {loc:?}");
+                self.touch_positions.remove(&id);
+                if let Some(g) = self.touch_gesture.take() {
+                    if g.id == id {
+                        if g.mouse {
+                            let mode = self.panes.get(&g.pane).map(|p| p.term.mode()).unwrap_or_default();
+                            if let Some(bytes) = encode_mouse(mode, pretty_core::MouseButton::Left, MouseEventKind::Release, g.col, g.row, self.core_modifiers()) {
+                                if let Some(pane) = self.panes.get_mut(&g.pane) {
+                                    let _ = pane.pty.write(&bytes);
+                                }
+                            }
+                            self.mouse.button = None;
+                        } else if g.selecting && !g.moved {
+                            if let Some(pane) = self.panes.get_mut(&g.pane) {
+                                pane.term.clear_selection();
+                            }
+                        }
+                    }
+                }
+                if self.touch_positions.len() < 2 {
+                    self.touch_scroll_y = None;
+                    self.touch_scroll_pane = None;
+                }
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
+        }
+    }
+
+    fn touch_centroid(&self) -> (f64, f64) {
+        if self.touch_positions.is_empty() {
+            return (0.0, 0.0);
+        }
+        let n = self.touch_positions.len() as f64;
+        let (x, y) = self
+            .touch_positions
+            .values()
+            .fold((0.0, 0.0), |(x, y), p| (x + p.x, y + p.y));
+        (x / n, y / n)
+    }
+
+    fn cancel_touch_gesture(&mut self) {
+        if let Some(g) = self.touch_gesture.take() {
+            if g.mouse {
+                let mode = self.panes.get(&g.pane).map(|p| p.term.mode()).unwrap_or_default();
+                if let Some(bytes) = encode_mouse(mode, pretty_core::MouseButton::Left, MouseEventKind::Release, g.col, g.row, self.core_modifiers()) {
+                    if let Some(pane) = self.panes.get_mut(&g.pane) {
+                        let _ = pane.pty.write(&bytes);
+                    }
+                }
+                self.mouse.button = None;
+            } else if g.selecting {
+                if let Some(pane) = self.panes.get_mut(&g.pane) {
+                    pane.term.clear_selection();
+                }
+            }
+        }
+    }
+
+    fn handle_file_drop(&mut self, path: PathBuf) {
+        if self.settings.open {
+            return;
+        }
+        let path_text = path.to_string_lossy();
+        let text = format!("{} ", shell_quote_path(&path_text));
+        let mode = self.panes.get(&self.focused).map(|p| p.term.mode()).unwrap_or_default();
+        self.write_to_focused(&encode_paste(mode, &text));
+        log::info!("file drop inserted path: {}", path.display());
+        if let Some(w) = &self.window {
+            w.set_cursor(winit::window::CursorIcon::Text);
+            w.request_redraw();
+        }
+    }
+
+    fn handle_context_action(&mut self, action: ContextAction) {
+        match action {
+            ContextAction::Copy => self.copy_selection(),
+            ContextAction::Paste => self.paste_clipboard(),
+            ContextAction::SelectAll => self.select_all(),
+            ContextAction::Clear => self.write_to_focused(b"\x0c"),
+            ContextAction::SplitRight => self.split_pane(pretty_core::Axis::Horizontal),
+            ContextAction::SplitDown => self.split_pane(pretty_core::Axis::Vertical),
+            ContextAction::ClosePane => self.close_pane(self.focused),
+            ContextAction::Settings => {
+                self.settings.open = true;
+                self.settings.draft = self.config.clone();
+            }
+            ContextAction::Quit => self.exit_requested = true,
+        }
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
+    fn update_ime_area(&mut self, frames: &[(Rect, PaneId, pretty_core::Frame)]) {
+        let Some(window) = &self.window else { return };
+        let Some(renderer) = &self.renderer else { return };
+        let Some((rect, _, frame)) = frames.iter().find(|(_, id, _)| *id == self.focused) else {
+            self.ime_cursor = None;
+            return;
+        };
+        let Some(cursor) = frame.cursor.filter(|c| c.visible) else {
+            self.ime_cursor = None;
+            return;
+        };
+        let metrics = renderer.cell_metrics();
+        let padding = self.config.padding;
+        let x = rect.x + padding + cursor.col as f32 * metrics.cell_w;
+        let y = rect.y + padding + cursor.row as f32 * metrics.cell_h;
+        self.ime_cursor = Some(egui::pos2(
+            x / self.scale_factor as f32,
+            y / self.scale_factor as f32,
+        ));
+        window.set_ime_cursor_area(
+            PhysicalPosition::new(x as f64, y as f64),
+            PhysicalSize::new(metrics.cell_w.max(1.0) as u32, metrics.cell_h.max(1.0) as u32),
+        );
+    }
+
     fn core_modifiers(&self) -> CoreModifiers {
         CoreModifiers {
             shift: self.modifiers.shift_key(),
@@ -1142,6 +1481,17 @@ impl PrettyApp {
             font_family,
         };
         let mut changed = false;
+        let lang = self.lang;
+        let has_selection = self
+            .panes
+            .get(&self.focused)
+            .map(|p| p.term.selection_present())
+            .unwrap_or(false);
+        let mut menu_open = self.context_menu;
+        let mut menu_action = None;
+        let drop_hover = self.drop_hover.clone();
+        let preedit = self.ime_preedit.clone();
+        let ime_cursor = self.ime_cursor;
         let (output, output_cursor) = {
             let state = self.egui_state.as_mut()?;
             let raw_input = state.take_egui_input(&window);
@@ -1151,14 +1501,51 @@ impl PrettyApp {
                     &mut self.settings,
                     &info,
                     env!("CARGO_PKG_VERSION"),
+                    lang,
                 );
+                if !self.settings.open {
+                    menu_action = menu::show(root.ctx(), &mut menu_open, lang, has_selection);
+                }
+                if let Some(path) = &drop_hover {
+                    egui::Area::new(egui::Id::new("pretty-drop-hint"))
+                        .order(egui::Order::Foreground)
+                        .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -20.0))
+                        .show(root.ctx(), |ui| {
+                            egui::Frame::popup(ui.style())
+                                .fill(egui::Color32::from_rgb(24, 31, 43))
+                                .show(ui, |ui| {
+                                    ui.label(format!(
+                                        "{}: {}",
+                                        tr(lang, "Drop file to insert its path"),
+                                        path.display()
+                                    ));
+                                });
+                        });
+                }
+                if !preedit.is_empty() {
+                    let p = ime_cursor.unwrap_or(egui::pos2(24.0, 48.0));
+                    egui::Area::new(egui::Id::new("pretty-ime-preedit"))
+                        .order(egui::Order::Tooltip)
+                        .fixed_pos(p + egui::vec2(0.0, 18.0))
+                        .show(root.ctx(), |ui| {
+                            egui::Frame::popup(ui.style())
+                                .fill(egui::Color32::from_rgb(24, 31, 43))
+                                .show(ui, |ui| {
+                                    ui.label(&preedit);
+                                });
+                        });
+                }
             });
             let cursor = egui_cursor_icon(&output.platform_output);
             state.handle_platform_output(&window, output.platform_output.clone());
             (output, cursor)
         };
+        self.context_menu = menu_open;
         if let Some(cursor) = output_cursor {
             window.set_cursor(cursor);
+        }
+        if let Some(action) = menu_action {
+            self.handle_context_action(action);
         }
         if changed {
             self.config = self.settings.draft.clone();
@@ -1196,7 +1583,7 @@ impl PrettyApp {
                 frame.cursor = None;
             } else if !self.settings.open && self.config.cursor_blink && !self.blink_on {
                 if let Some(c) = frame.cursor.as_mut() {
-                    c.visible = false;
+                    c.off = true;
                 }
             }
             if self.settings.open {
@@ -1204,6 +1591,7 @@ impl PrettyApp {
             }
             frames.push((rect, id, frame));
         }
+        self.update_ime_area(&frames);
         if let Some((_, _, frame)) = frames.first() {
             let shape = frame.cursor.map(|c| c.shape);
             if !self.cursor_logged || shape != self.last_cursor_shape {
@@ -1372,6 +1760,7 @@ impl ApplicationHandler<UserEvent> for PrettyApp {
                 std::process::exit(0);
             }
             WindowEvent::Resized(size) => {
+                self.context_menu = None;
                 if let Some(r) = self.renderer.as_mut() {
                     r.resize(size.width.max(1), size.height.max(1));
                 }
@@ -1400,6 +1789,7 @@ impl ApplicationHandler<UserEvent> for PrettyApp {
                 if event.state == ElementState::Pressed {
                     if self.modifiers.control_key() && matches!(&event.logical_key, WinitKey::Character(s) if s == ",") {
                         self.settings.open = !self.settings.open;
+                        self.context_menu = None;
                         if self.settings.open {
                             self.settings.draft = self.config.clone();
                         }
@@ -1408,26 +1798,44 @@ impl ApplicationHandler<UserEvent> for PrettyApp {
                         }
                         return;
                     }
-                    if self.settings.open && event.logical_key.as_ref() == WinitKey::Named(WinitNamedKey::Escape) {
+                    if event.logical_key.as_ref() == WinitKey::Named(WinitNamedKey::Escape)
+                        && (self.settings.open || self.context_menu.is_some())
+                    {
                         self.settings.open = false;
+                        self.context_menu = None;
                         if let Some(w) = &self.window {
                             w.request_redraw();
                         }
                         return;
                     }
                 }
-                if self.settings.open {
+                if self.settings.open || self.context_menu.is_some() {
                     return;
                 }
                 self.process_key(&event);
             }
-            WindowEvent::Ime(Ime::Commit(text)) => {
-                if !self.settings.open {
-                    self.write_to_focused(text.as_bytes());
-                    if let Some(w) = &self.window {
-                        w.request_redraw();
-                    }
+            WindowEvent::Ime(ime) => {
+                self.process_ime(ime, egui_consumed);
+            }
+            WindowEvent::Touch(touch) => {
+                self.process_touch(touch, egui_consumed);
+            }
+            WindowEvent::HoveredFile(path) => {
+                self.drop_hover = Some(path);
+                if let Some(w) = &self.window {
+                    w.set_cursor(winit::window::CursorIcon::Copy);
+                    w.request_redraw();
                 }
+            }
+            WindowEvent::HoveredFileCancelled => {
+                self.drop_hover = None;
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
+            WindowEvent::DroppedFile(path) => {
+                self.drop_hover = None;
+                self.handle_file_drop(path);
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.process_cursor_moved(position, egui_consumed);
@@ -1446,6 +1854,9 @@ impl ApplicationHandler<UserEvent> for PrettyApp {
                 if focused {
                     self.blink_on = true;
                     self.last_blink = Instant::now();
+                }
+                if let Some(w) = &self.window {
+                    w.set_ime_allowed(focused);
                 }
                 let bytes = if focused { b"\x1b[I".as_slice() } else { b"\x1b[O".as_slice() };
                 let reports = self
@@ -1475,6 +1886,10 @@ impl ApplicationHandler<UserEvent> for PrettyApp {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self.exit_requested {
+            event_loop.exit();
+            return;
+        }
         let blinking = self
             .panes
             .get(&self.focused)
@@ -1485,7 +1900,7 @@ impl ApplicationHandler<UserEvent> for PrettyApp {
         if blinking {
             let now = Instant::now();
             if now >= self.last_blink {
-                self.last_blink = now + Duration::from_millis(500);
+                self.last_blink = now + Duration::from_millis(530);
                 self.blink_on = !self.blink_on;
                 if let Some(w) = &self.window {
                     w.request_redraw();
@@ -1578,4 +1993,131 @@ fn egui_cursor_icon(output: &egui::PlatformOutput) -> Option<winit::window::Curs
         egui::CursorIcon::ResizeVertical => winit::window::CursorIcon::NsResize,
         _ => winit::window::CursorIcon::Default,
     })
+}
+
+
+fn percent_decode_path(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = |b: u8| -> Option<u8> {
+                match b {
+                    b'0'..=b'9' => Some(b - b'0'),
+                    b'a'..=b'f' => Some(b - b'a' + 10),
+                    b'A'..=b'F' => Some(b - b'A' + 10),
+                    _ => None,
+                }
+            };
+            if let (Some(hi), Some(lo)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
+                out.push(hi * 16 + lo);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Turn one or more `file://` URIs into shell-quoted local paths. Returns
+/// `None` for ordinary clipboard text so normal paste is untouched.
+fn file_uris_to_shell_paths(text: &str) -> Option<String> {
+    let mut paths = Vec::new();
+    for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        if line.starts_with('#') {
+            continue;
+        }
+        let rest = line.strip_prefix("file://")?;
+        let path = rest.strip_prefix("localhost").unwrap_or(rest);
+        if !path.starts_with('/') {
+            return None;
+        }
+        paths.push(shell_quote_path(&percent_decode_path(path)));
+    }
+    if paths.is_empty() {
+        None
+    } else {
+        Some(format!("{} ", paths.join(" ")))
+    }
+}
+
+fn shell_quote_path(path: &str) -> String {
+    #[cfg(windows)]
+    {
+        format!("\"{}\"", path.replace('"', "\\\""))
+    }
+    #[cfg(not(windows))]
+    {
+        format!("'{}'", path.replace('\'', "'\\''"))
+    }
+}
+
+/// Load one CJK-capable system font into egui's fallback chain. egui ships
+/// Latin fonts only; without this the Chinese UI would render as tofu.
+fn install_ui_font(ctx: &egui::Context) {
+    let mut db = fontdb::Database::new();
+    db.load_system_fonts();
+    for name in [
+        "Noto Sans CJK SC",
+        "Noto Sans CJK",
+        "Droid Sans Fallback",
+        "WenQuanYi Micro Hei",
+        "Microsoft YaHei",
+        "PingFang SC",
+    ] {
+        let query = fontdb::Query {
+            families: &[fontdb::Family::Name(name)],
+            weight: fontdb::Weight::NORMAL,
+            stretch: fontdb::Stretch::Normal,
+            style: fontdb::Style::Normal,
+        };
+        let Some(id) = db.query(&query) else { continue };
+        let Some(face) = db.face(id) else { continue };
+        let fontdb::Source::File(path) = &face.source else { continue };
+        let Ok(bytes) = std::fs::read(path) else { continue };
+        let data = egui::FontData::from_blob(std::sync::Arc::new(bytes), face.index);
+        let families = vec![
+            egui::epaint::text::InsertFontFamily {
+                family: egui::FontFamily::Proportional,
+                priority: egui::epaint::text::FontPriority::Lowest,
+            },
+            egui::epaint::text::InsertFontFamily {
+                family: egui::FontFamily::Monospace,
+                priority: egui::epaint::text::FontPriority::Lowest,
+            },
+        ];
+        ctx.add_font(egui::epaint::text::FontInsert::new("pretty-cjk", data, families));
+        log::info!("UI CJK fallback font: {} ({})", name, path.display());
+        return;
+    }
+    log::warn!("no CJK system font found; Chinese UI text may show placeholder boxes");
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::shell_quote_path;
+
+    #[test]
+    fn file_drop_quotes_spaces_and_quotes() {
+        assert_eq!(shell_quote_path("/tmp/a b.txt"), "'/tmp/a b.txt'");
+        assert_eq!(shell_quote_path("/tmp/it's.txt"), "'/tmp/it'\\''s.txt'");
+        assert_eq!(shell_quote_path("/tmp/plain"), "'/tmp/plain'");
+    }
+
+    #[test]
+    fn clipboard_file_uris_become_shell_paths() {
+        assert_eq!(
+            super::file_uris_to_shell_paths("file:///tmp/a%20b.txt").as_deref(),
+            Some("'/tmp/a b.txt' ")
+        );
+        assert_eq!(
+            super::file_uris_to_shell_paths("file://localhost/tmp/a.txt\nfile:///tmp/b.txt").as_deref(),
+            Some("'/tmp/a.txt' '/tmp/b.txt' ")
+        );
+        assert_eq!(super::file_uris_to_shell_paths("ordinary text"), None);
+    }
 }

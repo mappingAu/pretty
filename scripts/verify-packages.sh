@@ -159,6 +159,9 @@ if have podman; then
 #!/bin/bash
 set -uo pipefail
 export DEBIAN_FRONTEND=noninteractive
+# Some hosts publish IPv6 for deb.debian.org but the rootless container has no
+# usable IPv6 route; force IPv4 so apt cannot hang in the verify step.
+echo 'Acquire::ForceIPv4 "true";' > /etc/apt/apt.conf.d/99force-ipv4
 apt-get update >/tmp/apt.log 2>&1
 if ! apt-get install -y --no-install-recommends /out/pkg.deb xvfb x11-utils imagemagick xdotool \
       libgl1-mesa-dri libegl-mesa0 dbus-x11 >/tmp/install.log 2>&1; then

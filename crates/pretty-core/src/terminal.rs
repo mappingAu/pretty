@@ -393,6 +393,7 @@ impl Terminal {
                         shape,
                         blinking: cursor_style.blinking,
                         visible: content.cursor.shape != VteCursorShape::Hidden,
+                        off: false,
                     });
                 }
             }

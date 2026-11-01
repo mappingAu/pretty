@@ -147,8 +147,11 @@ hands the payload to `GraphicsStore`. Supported attributes:
 Images are associated with the pane's terminal instance. Placements are resolved in cell
 coordinates at render time, so they move correctly when the pane is resized or scrolled.
 z-index `< 0` is drawn below text; `>= 0` is drawn above text. Out-of-order/malformed
-payloads produce an error response, never a panic. Animation, shared-memory transmission and
-file-path transmission are explicitly unsupported and are listed in `KITTY-COMPAT.md`.
+payloads produce an error response, never a panic. `a=f`/`a=a` animation commands,
+shared-memory transmission and file-path transmission are explicitly unsupported and are
+listed in `KITTY-COMPAT.md`. Opaque RGB frames transmitted with auto-assigned ids at the same
+anchor are treated as successive frames of one animation (the policy used by mpv's kitty
+output); older frames and GPU textures are evicted under a compact resource budget.
 
 ### 3.4 Input encoding
 
@@ -165,10 +168,36 @@ Keyboard events are translated by `pretty-core::input` using the flags exposed b
 
 When kitty flags are not active, UTF-8 text and traditional xterm sequences are emitted,
 including application-cursor and application-keypad modes. Mouse reporting supports X10,
-normal (1000), button-motion (1002) and any-motion (1003) tracking with UTF-8 (1005), SGR
-(1006) and urxvt (1015) encodings. Shift overrides mouse reporting for local selection.
+normal (1000), button-motion (1002) and any-motion (1003) tracking with UTF-8 (1005) and SGR
+(1006) encodings. Shift overrides mouse reporting for local selection.
 
-### 3.5 Tiling and panes
+### 3.5 Desktop UX layer
+
+The winit application layer owns desktop interaction independently of the core:
+
+* **Touch** (`WindowEvent::Touch`): one finger taps for focus and drags for local
+  selection; two concurrent fingers produce scrollback motion. When the foreground
+  application has enabled mouse reporting, touches are translated to left
+  press/motion/release with the same encoder as a mouse.
+* **File drops** (`HoveredFile`/`DroppedFile`): paths are shell-quoted and sent through
+  the normal paste path. Clipboard text made of `file://` URIs is detected and converted
+  to the same representation, so copying a file in Dolphin and pressing Ctrl+Shift+V
+  inserts a usable path.
+* **IME** (`WindowEvent::Ime`): winit IME is enabled on focus, the cursor area is updated
+  from the terminal cursor every frame, and preedit text is drawn as an egui overlay while
+  commits are written to the focused PTY. On Linux X11/XWayland, `XMODIFIERS` is filled in
+  only when Fcitx5 is already running.
+* **Context menu**: a right click (or Shift+right click during mouse reporting) opens a
+  native egui menu whose actions call the same selection/clipboard/pane methods as the
+  keyboard shortcuts.
+* **Localisation**: `pretty-app::i18n` maps stable English keys to English/简体中文. A
+  system CJK face is appended to egui's font fallback chain so translated labels render
+  without bundling a large CJK font in every package.
+* **Cursor blink**: the off phase keeps a dim cell outline rather than removing the cursor
+  entirely, and typing resets the blink phase, so the insertion point never becomes
+  ambiguous.
+
+### 3.6 Tiling and panes
 
 `pretty-core::layout` defines an immutable tree:
 
@@ -185,7 +214,7 @@ terminal, graphics store, selection and scroll offset. Splitting/closing termina
 corresponding child process. The terminal core does not know about egui, winit, or pixels.
 Panes are in-window splits; there is no tab/session model yet.
 
-### 3.6 Scrollback and viewport
+### 3.7 Scrollback and viewport
 
 Alacritty's history grid stores scrollback (`scrolling_history` configurable, default
 10,000). Wheel and keyboard scroll call `Term::scroll_display`; any new output while the view

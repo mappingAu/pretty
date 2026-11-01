@@ -24,6 +24,7 @@ pretty-core.workspace = true
 pretty-renderer.workspace = true
 crossbeam-channel.workspace = true
 directories.workspace = true
+fontdb.workspace = true
 egui.workspace = true
 egui-winit.workspace = true
 env_logger.workspace = true

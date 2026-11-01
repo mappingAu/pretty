@@ -182,6 +182,9 @@ impl SolidRenderer {
 
 struct ImageTexture {
     bind_group: wgpu::BindGroup,
+    texture: wgpu::Texture,
+    width: u32,
+    height: u32,
 }
 
 pub struct ImageRenderer {
@@ -190,6 +193,7 @@ pub struct ImageRenderer {
     buffer: wgpu::Buffer,
     capacity: usize,
     textures: HashMap<(u32, u64), ImageTexture>,
+    sampler: wgpu::Sampler,
     batches: Vec<ImageBatch>,
     count: u32,
 }
@@ -288,12 +292,19 @@ impl ImageRenderer {
             "pretty-image-instances",
             MAX_IMAGE_QUADS,
         );
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("pretty-image-sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
         Self {
             pipeline,
             layout,
             buffer,
             capacity: MAX_IMAGE_QUADS,
             textures: HashMap::new(),
+            sampler,
             batches: Vec::new(),
             count: 0,
         }
@@ -305,6 +316,7 @@ impl ImageRenderer {
         queue: &wgpu::Queue,
         sampler: &wgpu::Sampler,
         item: &ImageItem,
+        live: &std::collections::HashSet<(u32, u64)>,
     ) {
         if self.textures.contains_key(&item.key) {
             return;
@@ -317,6 +329,35 @@ impl ImageRenderer {
             height: item.height,
             depth_or_array_layers: 1,
         };
+        // Animation clients replace the whole image every frame. Reuse a
+        // stale texture of the same dimensions instead of allocating a new
+        // texture and bind group 30-60 times per second.
+        let reusable = self
+            .textures
+            .iter()
+            .find(|(key, tex)| !live.contains(*key) && tex.width == item.width && tex.height == item.height)
+            .map(|(key, _)| *key);
+        if let Some(old) = reusable {
+            if let Some(tex) = self.textures.remove(&old) {
+                queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &tex.texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    &item.rgba,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(item.width * 4),
+                        rows_per_image: Some(item.height),
+                    },
+                    size,
+                );
+                self.textures.insert(item.key, tex);
+                return;
+            }
+        }
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("pretty-kitty-image"),
             size,
@@ -352,7 +393,7 @@ impl ImageRenderer {
             size,
         );
         // Keep the texture alive through the bind group/view.
-        self.textures.insert(item.key, ImageTexture { bind_group });
+        self.textures.insert(item.key, ImageTexture { bind_group, texture, width: item.width, height: item.height });
     }
 
     pub fn prepare(
@@ -361,16 +402,12 @@ impl ImageRenderer {
         queue: &wgpu::Queue,
         items: &[ImageItem],
     ) -> Result<(), RendererError> {
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("pretty-image-sampler"),
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
-        });
+        let live: std::collections::HashSet<_> = items.iter().map(|item| item.key).collect();
+        let sampler = self.sampler.clone();
         let mut instances = Vec::with_capacity(items.len());
         self.batches.clear();
         for item in items {
-            self.ensure_texture(device, queue, &sampler, item);
+            self.ensure_texture(device, queue, &sampler, item, &live);
             if !self.textures.contains_key(&item.key) {
                 continue;
             }
@@ -388,6 +425,10 @@ impl ImageRenderer {
             }
             instances.push(inst);
         }
+        // Kitty animation clients (notably mpv) allocate a new image id per
+        // frame. Drop GPU textures for images that are no longer referenced;
+        // otherwise a video slowly consumes VRAM and eventually stalls.
+        self.textures.retain(|key, _| live.contains(key));
         if instances.len() > self.capacity {
             log::warn!("image instance overflow");
             instances.truncate(self.capacity);

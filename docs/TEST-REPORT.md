@@ -223,6 +223,113 @@ The host feature matrix also passes for default, metal, dx, vulkan-only and
 gles-only. These are compile-only checks, not runtime ports; Android still needs
 an NDK/Gradle APK phase and Metal/DirectX remain runtime stubs.
 
+## Follow-up UX hardening (2026-11-01)
+
+The original UX complaints were reproduced on this host and addressed in the
+application/input layers. Evidence is retained in
+`test-artifacts/ux-20261101-1128/` and in the screenshots below.
+
+### mpv `--vo=kitty`
+
+The failure was resource growth: mpv transmits each opaque RGB frame with an
+auto-assigned image id and `q=2` at the same cell. Before the fix, the 256-image
+table filled and the image renderer retained every texture. Now an opaque
+`format=24` auto-id placement at the same anchor replaces the previous one, and
+a 256 MiB/256-image resource guard evicts least-recently-created images; the GPU
+texture cache is pruned every frame.
+
+A 15 s, 30 fps H.264 testsrc was played by `mpv --vo=kitty` (1152×648 output):
+**No image-table errors and no freezes occurred**: a longer run accepted 441
+frames, RSS stayed around 226 MiB, and the UI continued rendering. In the final
+non-debug run the app used about 57–67% of one CPU core; video playback progressed
+below the source's 30 fps because image decode/upload is still synchronous on
+the UI thread. This is a throughput limitation, not the previous freeze. The
+playback screenshot shows live video, not a frozen first frame:
+
+![mpv kitty video](screenshots/ux-kitty-video.png)
+
+### Touchscreen
+
+The host exposes a `wch.cn TouchScreen` (XInput2 touch device). A synthetic
+uinput touch sequence was delivered through XWayland to the final binary and
+logged by the app:
+
+```
+touch start id=9 at PhysicalPosition { x: 360.98, y: 405.99 }
+touch end   id=9 at PhysicalPosition { x: 435.98, y: 455.99 }
+```
+
+Winit X11 touch events are now routed as: tap → focus, one-finger drag →
+selection, two-finger vertical gesture → scrollback; when the application has
+mouse reporting enabled a tap/drag is translated to left-button press/motion/
+release. The physical touchscreen path is the same XInput2 path; the synthetic
+injection verifies event delivery and coordinates.
+
+### External files: drag and paste
+
+Dolphin was used as a real XDG drag source. Dragging `drop-test.txt` into the
+terminal inserted the shell-quoted path:
+
+![File drop inserts a quoted path](screenshots/ux-file-drop.png)
+
+Copying the same file in Dolphin puts a `file:///...` URI on the clipboard.
+Ctrl+Shift+V now detects that URI form, percent-decodes it and inserts the
+quoted local path instead of the raw URI:
+
+![Pasting a copied file inserts a path](screenshots/ux-file-paste.png)
+
+A unit test covers spaces, embedded single quotes, `file://localhost`, multiple
+URI lines and percent-decoding.
+
+### IME
+
+Fcitx5 was already running, but the X11 session had no `XMODIFIERS`; XWayland
+clients therefore could not reach the XIM server. Pretty now sets
+`XMODIFIERS=@im=fcitx` only when Fcitx5 is running and the variable is absent,
+enables winit IME, updates `set_ime_cursor_area` from the terminal cursor, and
+handles `Ime::Preedit`/`Commit` (with a small inline preedit overlay).
+
+Typing `nihao` through Fcitx Pinyin and committing with Space/Return inserted
+the UTF-8 bytes for `你好` (commit length 6 bytes); the screenshot shows both
+committed Chinese lines:
+
+![Fcitx IME commit in Pretty](screenshots/ux-ime.png)
+
+The candidate window itself is drawn by Fcitx, not Pretty.
+
+### Context menu, language and sizing
+
+Right-click in the terminal (or Shift+right-click while an application has
+mouse reporting enabled) opens the native egui context menu:
+
+![Right-click context menu](screenshots/ux-context-menu.png)
+
+The menu provides copy, paste, select all, clear, split-right/down, close pane,
+settings and quit. Disabled copy is visibly greyed out when there is no
+selection.
+
+The UI is now localised without a new runtime dependency. The system locale is
+`LANG=zh_CN.UTF-8`, so auto mode selected Chinese; a system Noto Sans CJK face
+is inserted into egui as a fallback, and the Settings page offers Auto / English
+/ 简体中文. The settings screenshot shows the localised page:
+
+![Chinese settings UI](screenshots/ux-settings-zh.png)
+
+The top-right Settings button now has an explicit `104×30` logical minimum size,
+so opening and closing Settings cannot change its layout size. The cursor blink
+off-phase now draws a dim outline instead of making the cursor disappear; this
+keeps the insertion point visible while remaining clearly blinking. The
+settings window was opened and closed repeatedly during this check; the button
+retained its fixed footprint.
+
+### Verification scope
+
+These are real host tests, but the touch sequence used a synthetic uinput
+device rather than a human finger on the panel. The physical panel and Fcitx
+candidate UI should still be checked interactively by the user. The mpv test
+used a generated testsrc video; other codecs and very large videos may exercise
+different frame sizes, but the image/table limits are independent of codec.
+
 ## Known test limitations
 
 - Only one NVIDIA GPU is available, so the GLES test uses the same GPU through

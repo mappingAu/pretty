@@ -43,6 +43,22 @@ matrix, [docs/TEST-REPORT.md](docs/TEST-REPORT.md) for real-hardware evidence an
   wheel scrolling; scroll regions and alternate screen from the terminal core.
 - **Tiling panes** with real PTYs, keyboard focus navigation and per-pane
   terminals.
+- **Touchscreen support**: tap to focus, drag to select and two-finger vertical
+  swipes to scroll; touch is translated to mouse reports when an application
+  enables mouse tracking.
+- **Right-click context menu** with copy/paste, select all, clear, split/close
+  pane, settings and quit. With application mouse reporting enabled, use
+  Shift+right-click or the keyboard shortcuts.
+- **File drop/paste**: drag files from Dolphin/other XDG drag sources or paste
+  `file://` URIs; paths are shell-quoted before insertion.
+- **English / 简体中文 UI** with automatic locale detection and a language
+  selector in Settings; a system CJK font is used as the egui fallback.
+- **Fcitx5 XIM input** on X11/XWayland, including IME cursor
+  placement and an inline preedit overlay. On Plasma Wayland sessions Pretty
+  fills in `XMODIFIERS` when Fcitx5 is running but the variable is unset.
+- **Animated kitty images** (mpv `--vo=kitty`): opaque auto-id frames that repeat
+  at the same anchor replace the previous frame, and all image/GPU caches are
+  bounded and evicted. A long video no longer fills the 256-image table.
 - Translucent window with **KWin blur-behind** on KDE/X11; no fake CPU blur.
 - A customisable egui settings panel (Ctrl+, or the Settings button) covering
   font, colours, opacity, blur, padding, scrollback, tiling gap, vsync and
@@ -148,6 +164,7 @@ shell = "/bin/bash"
 allow_osc52_paste = true
 window_width = 1280
 window_height = 820
+language = "auto"          # auto | en | zh-CN
 ui_accent = "#7aa2f7"
 ui_panel_opacity = 1.0
 prefer_x11_for_blur = true

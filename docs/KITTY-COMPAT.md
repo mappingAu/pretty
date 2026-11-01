@@ -31,7 +31,11 @@ Verification artifacts live in `docs/screenshots/` and `test-artifacts/` (from
 | Cursor shape via DECSCUSR | Implemented | core tests `default_cursor_is_block`, `decscusr_changes_cursor_shape`; cursor-shape demo log/screenshots |
 | Window title OSC 0/2 | Implemented | hardware script asserts `Pretty OSC Title` |
 | Bell | Implemented | app requests user attention and logs |
-| Selection / copy / paste | Implemented | simple selection, Ctrl+Shift+C/V, Shift+Mouse overrides mouse reporting |
+| Selection / copy / paste | Implemented | simple selection, Ctrl+Shift+C/V, Shift+Mouse overrides mouse reporting; clipboard `file://` URIs become quoted paths |
+| Touch input | Implemented | tap focus, one-finger selection drag, two-finger scroll, mouse-report translation; synthetic XInput2 test in TEST-REPORT |
+| Right-click context menu | Implemented | copy/paste/select-all/clear/split/close/settings/quit; Shift+right-click while mouse reporting is active |
+| IME / XIM | Implemented | Fcitx5 XIM auto-`XMODIFIERS`, cursor area, preedit/commit; 你好 commit verified |
+| UI localisation | Implemented | English / 简体中文 via `language`, system-locale auto-detection and system CJK egui fallback |
 
 ## kitty graphics protocol
 
@@ -51,7 +55,8 @@ interceptor that preserves boundaries across PTY reads.
 | Images clipped to their pane | Implemented | CPU UV-rect clipping in `gpu.rs`; no spill with tiling |
 | Images move with scrollback | Partial | placement anchors are stored as absolute lines and offset at draw; exact kitty semantics around history are not exhaustively tested |
 | Response protocol `OK`/`EINVAL` with q suppression | Implemented | graphics probe captures responses |
-| Max resource bounds | Implemented | 256 images, 1024 placements, 64 MiB APC, 32 megapixel decoded image |
+| Max resource bounds | Implemented | 256 images, 256 MiB decoded pixels, 1024 placements, 64 MiB APC, 32 megapixel image; LRU eviction and GPU-texture pruning |
+| Opaque auto-id animation frames | Implemented | mpv `--vo=kitty` tested for 441 frames / 15 s; opaque `f=24` auto-id frames at the same anchor replace the previous placement, preventing image-table exhaustion |
 | zlib compression `o=z` | Not implemented | returns explicit EINVAL |
 | File path transmission, shared memory | Not implemented | not supported; listed in KNOWN-ISSUES |
 | Animation / frames (`a=f`, `a=a`) | Not implemented | explicit EINVAL |

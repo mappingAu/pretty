@@ -57,29 +57,21 @@ impl StreamFilter {
 
     pub fn feed(&mut self, input: &[u8]) -> Vec<StreamItem> {
         let mut out = Vec::new();
-        for &b in input {
+        let mut i = 0;
+        while i < input.len() {
+            // APC payloads are frequently multi-megabyte (kitty image/video
+            // frames). Do not run the per-byte state machine over the huge
+            // payload: scan to the terminator as a slice instead.
+            if self.mode == Mode::Apc {
+                self.flush_bytes(&mut out);
+                self.feed_apc(&input[i..], &mut out);
+                return out;
+            }
+            let b = input[i];
+            i += 1;
             match self.mode {
                 Mode::Normal => self.normal_byte(b),
-                Mode::Apc => {
-                    self.payload.push(b);
-                    if self.payload.ends_with(b"\x1b\\") {
-                        let mut payload = std::mem::take(&mut self.payload);
-                        payload.truncate(payload.len() - 2);
-                        self.flush_bytes(&mut out);
-                        // Strip the leading "G" that identifies the kitty
-                        // graphics APC command.
-                        if payload.first() == Some(&b'G') {
-                            out.push(StreamItem::Graphics(payload[1..].to_vec()));
-                        } else if !payload.is_empty() {
-                            warn!("ignoring unsupported APC sequence of {} bytes", payload.len());
-                        }
-                        self.mode = Mode::Normal;
-                    } else if self.payload.len() > MAX_APC {
-                        warn!("APC sequence exceeds {MAX_APC} bytes; discarding");
-                        self.payload.clear();
-                        self.mode = Mode::Ignore;
-                    }
-                }
+                Mode::Apc => unreachable!("APC is handled by feed_apc"),
                 Mode::Osc => {
                     if b == 0x07 {
                         self.finish_osc(false, &mut out);
@@ -89,8 +81,6 @@ impl StreamFilter {
                             self.finish_osc(true, &mut out);
                         } else if self.payload.len() > MAX_OSC {
                             warn!("OSC sequence exceeds {MAX_OSC} bytes; passing through without parsing");
-                            // Already copied to `bytes`; skip notification parsing
-                            // and wait for the real terminator.
                             self.mode = Mode::Ignore;
                             self.payload.clear();
                         }
@@ -109,6 +99,35 @@ impl StreamFilter {
         }
         self.flush_bytes(&mut out);
         out
+    }
+
+    /// Fast path for a complete or partial APC sequence. The caller has already
+    /// consumed the `ESC _` introducer. Any normal bytes after the terminator
+    /// are fed back through the normal state machine.
+    fn feed_apc(&mut self, input: &[u8], out: &mut Vec<StreamItem>) {
+        self.payload.extend_from_slice(input);
+        let Some(pos) = self.payload.windows(2).position(|w| w == b"\x1b\\") else {
+            if self.payload.len() > MAX_APC {
+                warn!("APC sequence exceeds {MAX_APC} bytes; discarding");
+                self.payload.clear();
+                self.mode = Mode::Ignore;
+            }
+            return;
+        };
+        let mut payload = std::mem::take(&mut self.payload);
+        let tail = payload.split_off(pos + 2);
+        payload.truncate(pos);
+        self.flush_bytes(out);
+        if payload.first() == Some(&b'G') {
+            out.push(StreamItem::Graphics(payload[1..].to_vec()));
+        } else if !payload.is_empty() {
+            warn!("ignoring unsupported APC sequence of {} bytes", payload.len());
+        }
+        self.mode = Mode::Normal;
+        if !tail.is_empty() {
+            let rest = self.feed(&tail);
+            out.extend(rest);
+        }
     }
 
     fn normal_byte(&mut self, b: u8) {

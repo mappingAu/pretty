@@ -2604,6 +2604,7 @@ dependencies = [
  "egui",
  "egui-winit",
  "env_logger",
+ "fontdb",
  "log",
  "open",
  "pollster",

@@ -2,6 +2,8 @@
 
 mod app;
 mod config;
+mod i18n;
+mod menu;
 mod platform;
 mod settings;
 
@@ -115,6 +117,28 @@ fn ensure_terminfo() {
     if terminfo.join("p").join("pretty").exists() {
         std::env::set_var("TERMINFO", &terminfo);
         log::info!("using bundled terminfo at {}", terminfo.display());
+    }
+}
+
+/// XWayland applications need XMODIFIERS to reach Fcitx's XIM server. Plasma
+/// Wayland sessions commonly start Fcitx without exporting it to X11 clients,
+/// which makes IME input silently impossible. Only fill the gap when an X11
+/// display exists and Fcitx is actually running.
+#[cfg(target_os = "linux")]
+fn prepare_x11_ime() {
+    if std::env::var_os("XMODIFIERS").is_some() || std::env::var_os("DISPLAY").is_none() {
+        return;
+    }
+    let running = std::process::Command::new("fcitx5-remote")
+        .arg("--check")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if running {
+        std::env::set_var("XMODIFIERS", "@im=fcitx");
+        log::info!("XMODIFIERS unset; using running Fcitx5 XIM server");
     }
 }
 
@@ -248,6 +272,9 @@ fn main() -> ExitCode {
     #[cfg(target_os = "linux")]
     std::env::set_var("PRETTY_GL_FORCE_GLES", "1");
     std::env::set_var("PRETTY_GL_ALLOW_NON_NATIVE", "1");
+
+    #[cfg(target_os = "linux")]
+    prepare_x11_ime();
 
     let event_loop = match EventLoop::<UserEvent>::with_user_event().build() {
         Ok(e) => e,

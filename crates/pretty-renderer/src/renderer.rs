@@ -393,7 +393,7 @@ impl Renderer {
             let (cursor_row, cursor_col, cursor_shape) = pane
                 .frame
                 .cursor
-                .filter(|c| c.visible)
+                .filter(|c| c.visible && !c.off)
                 .map(|c| (c.row, c.col, c.shape))
                 .unwrap_or((usize::MAX, usize::MAX, CursorShape::Hidden));
             let cursor_block = matches!(cursor_shape, CursorShape::Block | CursorShape::HollowBlock);
@@ -489,18 +489,24 @@ impl Renderer {
             if let Some(cursor) = pane.frame.cursor.filter(|c| c.visible) {
                 let x = content_x + cursor.col as f32 * m.cell_w;
                 let y = content_y + cursor.row as f32 * m.cell_h;
-                let color = linear(t.cursor, 0.9);
-                match cursor.shape {
-                    CursorShape::Beam => {
-                        push_rect(&mut fg, Rect::new(x, y, 2.0, m.cell_h), color)
+                let color = linear(t.cursor, if cursor.off { 0.30 } else { 0.9 });
+                if cursor.off {
+                    // Keep the cursor location legible during the blink-off
+                    // phase instead of making it disappear entirely.
+                    push_outline(&mut fg, Rect::new(x, y, m.cell_w, m.cell_h), 1.0, color);
+                } else {
+                    match cursor.shape {
+                        CursorShape::Beam => {
+                            push_rect(&mut fg, Rect::new(x, y, 2.0, m.cell_h), color)
+                        }
+                        CursorShape::Underline => {
+                            push_rect(&mut fg, Rect::new(x, y + m.cell_h - 2.0, m.cell_w, 2.0), color)
+                        }
+                        CursorShape::HollowBlock => {
+                            push_outline(&mut fg, Rect::new(x, y, m.cell_w, m.cell_h), 1.0, color)
+                        }
+                        _ => {}
                     }
-                    CursorShape::Underline => {
-                        push_rect(&mut fg, Rect::new(x, y + m.cell_h - 2.0, m.cell_w, 2.0), color)
-                    }
-                    CursorShape::HollowBlock => {
-                        push_outline(&mut fg, Rect::new(x, y, m.cell_w, m.cell_h), 1.0, color)
-                    }
-                    _ => {}
                 }
             }
             // Scrollbar.

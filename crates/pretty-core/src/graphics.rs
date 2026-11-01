@@ -17,6 +17,7 @@ use crate::frame::SharedImage;
 
 const MAX_IMAGE_PIXELS: u64 = 32 * 1024 * 1024;
 const MAX_IMAGES: usize = 256;
+const MAX_IMAGE_BYTES: usize = 256 * 1024 * 1024;
 const MAX_PLACEMENTS: usize = 1024;
 
 #[derive(Clone)]
@@ -40,6 +41,7 @@ struct Placement {
     rows: Option<u32>,
     z: i32,
     generation: u64,
+    auto_id: bool,
 }
 
 struct Pending {
@@ -53,6 +55,7 @@ struct Pending {
     control: Control,
     anchor_line: i32,
     anchor_col: usize,
+    auto_id: bool,
 }
 
 #[derive(Default, Clone, Debug)]
@@ -162,6 +165,17 @@ impl GraphicsStore {
             Ok(c) => c,
             Err(e) => return self.error(&e, None),
         };
+        if log::log_enabled!(log::Level::Debug) {
+            debug!(
+                "kitty graphics command action={:?} id={:?} placement={:?} quiet={} more={} bytes={}",
+                control.action,
+                control.id,
+                control.placement_id,
+                control.quiet,
+                control.more,
+                data_text.len()
+            );
+        }
         let anchor_line = cursor_row as i32 - display_offset as i32;
 
         // Continuation chunks are allowed to omit the action. kitty's chunked
@@ -214,6 +228,7 @@ impl GraphicsStore {
                     Ok(d) => d,
                     Err(e) => return self.error(&e, Some(id)),
                 };
+                let auto_id = control.id.unwrap_or(0) == 0;
                 let pending = Pending {
                     action,
                     format,
@@ -224,6 +239,7 @@ impl GraphicsStore {
                     quiet: control.quiet,
                     anchor_line,
                     anchor_col: cursor_col,
+                    auto_id,
                     control,
                 };
                 if pending.control.more {
@@ -254,8 +270,13 @@ impl GraphicsStore {
         if width as u64 * height as u64 > MAX_IMAGE_PIXELS {
             return self.error("image exceeds 32 megapixel limit", Some(id));
         }
-        if self.images.len() >= MAX_IMAGES && !self.images.contains_key(&id) {
-            return self.error("image table full (256 images)", Some(id));
+        let image_bytes = rgba.len();
+        // Animation clients (mpv's kitty VO is one) commonly allocate a fresh
+        // image ID per frame and do not delete the previous placement. Keep the
+        // newest frames and bound both the image count and resident bytes so a
+        // long video cannot exhaust memory or choke the renderer.
+        if !self.images.contains_key(&id) {
+            self.evict_until(MAX_IMAGES.saturating_sub(1), MAX_IMAGE_BYTES.saturating_sub(image_bytes), Some(id));
         }
         let generation = self.bump_generation();
         self.images.insert(
@@ -279,7 +300,40 @@ impl GraphicsStore {
                 rows: pending.control.rows,
                 z: pending.control.z,
                 generation,
+                auto_id: pending.auto_id,
             };
+            debug!(
+                "kitty graphics: image {id} anchored line {} col {} z={} cols={:?} rows={:?} auto={} opaque24={}",
+                p.anchor_line, p.anchor_col, p.z, p.cols, p.rows, p.auto_id, pending.format == 24
+            );
+            // mpv and similar animation clients use auto-assigned image ids
+            // with an opaque RGB frame at the same cell for every frame and
+            // quiet=2 (so they cannot delete by id). Treat such a transmission
+            // as replacing the previous opaque auto-id frame at that exact
+            // anchor instead of stacking hundreds of full-screen images.
+            if p.auto_id && pending.format == 24 {
+                let mut removed_images = Vec::new();
+                self.placements.retain(|q| {
+                    let same_anchor = q.auto_id
+                        && q.image_id != id
+                        && q.anchor_line == p.anchor_line
+                        && q.anchor_col == p.anchor_col
+                        && q.z == p.z
+                        && q.x_offset == p.x_offset
+                        && q.y_offset == p.y_offset
+                        && q.cols == p.cols
+                        && q.rows == p.rows;
+                    if same_anchor {
+                        removed_images.push(q.image_id);
+                    }
+                    !same_anchor
+                });
+                for old in removed_images {
+                    if !self.placements.iter().any(|q| q.image_id == old) {
+                        self.images.remove(&old);
+                    }
+                }
+            }
             self.add_placement(p);
         }
         let mut response = String::new();
@@ -315,6 +369,7 @@ impl GraphicsStore {
             rows: control.rows,
             z: control.z,
             generation,
+            auto_id: false,
         };
         self.add_placement(p);
         GraphicsEvent { response: (control.quiet != 2).then(|| format!("\x1b_Gi={image_id};OK\x1b\\")) }
@@ -322,19 +377,45 @@ impl GraphicsStore {
 
     fn add_placement(&mut self, p: Placement) {
         if self.placements.len() >= MAX_PLACEMENTS {
-            self.placements.remove(0);
+            // Drop the oldest placement and any image that becomes unreferenced.
+            let old = self.placements.remove(0);
+            if !self.placements.iter().any(|q| q.image_id == old.image_id) {
+                self.images.remove(&old.image_id);
+            }
         }
         self.placements.push(p);
     }
 
+    /// Evict least-recently-created images until both limits fit, preserving
+    /// `keep` (the image currently being stored). This is intentionally a
+    /// resource guard, not part of normal protocol semantics: clients that need
+    /// deterministic lifetimes should use kitty's delete commands.
+    fn evict_until(&mut self, max_count: usize, max_bytes: usize, keep: Option<u32>) {
+        let mut bytes: usize = self.images.values().map(|im| im.rgba.len()).sum();
+        while self.images.len() > max_count || bytes > max_bytes {
+            let victim = self
+                .images
+                .iter()
+                .filter(|(id, _)| Some(**id) != keep)
+                .min_by_key(|(_, im)| im.generation)
+                .map(|(id, _)| *id);
+            let Some(victim) = victim else { break };
+            if let Some(im) = self.images.remove(&victim) {
+                bytes = bytes.saturating_sub(im.rgba.len());
+                self.placements.retain(|p| p.image_id != victim);
+                debug!("kitty graphics: evicted image {victim} to stay within resource budget");
+            }
+        }
+    }
+
     fn delete(&mut self, control: &Control) -> GraphicsEvent {
         let mode = control.delete.unwrap_or('a');
-        match mode {
+        match mode.to_ascii_lowercase() {
             'a' => {
                 self.images.clear();
                 self.placements.clear();
             }
-            'i' | 'I' => {
+            'i' => {
                 let Some(id) = control.id else {
                     return self.error("delete requires image id", None);
                 };
@@ -353,6 +434,7 @@ impl GraphicsStore {
             }
             other => return self.error(&format!("unsupported delete mode '{other}'"), control.id),
         }
+        debug!("kitty graphics delete mode {mode:?} id={:?} placement={:?}", control.id, control.placement_id);
         self.generation += 1;
         GraphicsEvent { response: (control.quiet != 2).then(|| "\x1b_G;OK\x1b\\".to_owned()) }
     }
@@ -605,6 +687,31 @@ mod tests {
         let ev = s.handle(format!("a=t,f=24,s=2,v=2;{b64}").as_bytes(), 0, 0, 0);
         assert!(ev.response.unwrap().contains("EINVAL"));
         assert_eq!(s.image_count(), 0);
+    }
+
+    #[test]
+    fn auto_opaque_frames_replace_at_the_same_anchor() {
+        let mut s = GraphicsStore::new();
+        let b64 = base64::engine::general_purpose::STANDARD.encode([10u8, 20, 30]);
+        let ev = s.handle(format!("a=T,f=24,s=1,v=1,q=2;{b64}").as_bytes(), 1, 0, 0);
+        assert!(ev.response.is_none());
+        let first = s.frame_images(0)[0].image_id;
+        let ev = s.handle(format!("a=T,f=24,s=1,v=1,q=2;{b64}").as_bytes(), 1, 0, 0);
+        assert!(ev.response.is_none());
+        let frames = s.frame_images(0);
+        assert_eq!(frames.len(), 1, "new opaque auto-id frame should replace the old one");
+        assert_ne!(frames[0].image_id, first);
+        assert_eq!(s.image_count(), 1);
+    }
+
+    #[test]
+    fn explicit_image_ids_are_not_collapsed() {
+        let mut s = GraphicsStore::new();
+        let b64 = base64::engine::general_purpose::STANDARD.encode([10u8, 20, 30]);
+        s.handle(format!("a=T,f=24,s=1,v=1,i=10;{b64}").as_bytes(), 1, 0, 0);
+        s.handle(format!("a=T,f=24,s=1,v=1,i=11;{b64}").as_bytes(), 1, 0, 0);
+        assert_eq!(s.image_count(), 2);
+        assert_eq!(s.placement_count(), 2);
     }
 
     #[test]

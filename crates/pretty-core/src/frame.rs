@@ -89,6 +89,9 @@ pub struct CursorFrame {
     pub blinking: bool,
     /// A blinking cursor may be in the "off" phase; this is applied by the app.
     pub visible: bool,
+    /// Blink off phase: draw a dim outline instead of removing the cursor.
+    /// This keeps the cursor location visible without the full block inversion.
+    pub off: bool,
 }
 
 #[derive(Clone, Debug)]

@@ -35,6 +35,8 @@ pub struct Config {
     pub ui_panel_opacity: f32,
     pub prefer_x11_for_blur: bool,
     pub cursor_blink: bool,
+    /// UI language: `auto`, `en`, or `zh-CN`.
+    pub language: String,
 }
 
 impl Default for Config {
@@ -66,6 +68,7 @@ impl Default for Config {
             ui_panel_opacity: 1.0,
             prefer_x11_for_blur: true,
             cursor_blink: true,
+            language: "auto".into(),
         }
     }
 }
@@ -114,6 +117,13 @@ impl Config {
         self.ui_panel_opacity = self.ui_panel_opacity.clamp(0.5, 1.0);
         if self.shell.trim().is_empty() {
             self.shell = default_shell();
+        }
+        match self.language.as_str() {
+            "auto" | "en" | "en-US" | "zh" | "zh-CN" => {}
+            other => {
+                log::warn!("unsupported language '{other}'; using auto");
+                self.language = "auto".into();
+            }
         }
         if self.renderer.parse::<RendererKind>().is_err() {
             log::warn!("invalid renderer '{}'; falling back to auto", self.renderer);

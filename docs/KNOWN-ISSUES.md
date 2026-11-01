@@ -3,6 +3,32 @@
 This file is intentionally explicit. The project does not silently downgrade a
 renderer or represent a compile-only stub as a supported platform.
 
+## UX follow-up gaps
+
+- **Touch was verified with synthetic XInput2/uinput injection on this host's
+  `wch.cn TouchScreen` device, not by a person touching the panel.** The same
+  event path is used by winit, but the physical gesture calibration (edge
+  coordinates, palm rejection and two-finger momentum) should be checked
+  interactively.
+- **IME auto-configuration targets Fcitx5.** If the session uses IBus or a
+  different XIM server, set `XMODIFIERS` explicitly. The candidate window is
+  drawn by the input method; Pretty only provides the cursor area and commits.
+- **Chinese UI needs a CJK system font.** Pretty inserts a system font into
+  egui when found; a minimal container without Noto CJK/WenQuanYi will show
+  missing-glyph boxes for Chinese labels. This does not affect terminal text
+  fallback, which uses the renderer's font database.
+- **Context menu vs. applications that capture the mouse:** plain right-click
+  opens the menu only when mouse reporting is off; use Shift+right-click while
+  a TUI has mouse reporting enabled.
+- **File drag/drop requires an XDG drag source.** Paste converts `file://`
+  clipboard URIs, but sources that expose only proprietary formats still need
+  a text/plain fallback from the source application.
+- **Very large mpv frames are still decoded synchronously on the UI thread.**
+  The image table and GPU cache no longer grow without bound, but 4K/high-FPS
+  video can still use significant CPU; a dedicated image worker is future work.
+- **No plugin system.** The terminal has clear core/renderer/app boundaries,
+  but no stable plugin ABI or manifest format is implemented.
+
 ## Rendering / platform
 
 1. **GLES uses X11/XWayland on Linux.** With the current NVIDIA 580 driver, the
@@ -34,9 +60,11 @@ renderer or represent a compile-only stub as a supported platform.
 7. **Glyph atlas eviction is absent.** One 2048² R8 and one 1024² RGBA page are
    used. A glyph that does not fit is skipped with a warning. Unusual sessions
    with tens of thousands of unique glyph/style combinations can hit this.
-8. **Image texture cache is not evicted.** Kitty image generations accumulate in
-   GPU memory until the process exits. The core caps stored images at 256 and
-   placements at 1024.
+8. **Kitty image caches are bounded, with an animation-specific policy.** The
+   store caps the 256 newest images / 256 MiB of decoded pixels and removes old
+   GPU textures every frame. Opaque RGB auto-id frames at the same anchor replace
+   the previous placement (mpv's kitty VO pattern). `a=f`/`a=a` animation commands
+   are still unsupported, and high-resolution video decode remains synchronous.
 9. **No damage-based partial redraw.** Every presented frame rebuilds solid and
    text geometry for all panes. It is fast enough for the tested 124×39 grid in
    release mode, but it is not the most efficient possible renderer.
