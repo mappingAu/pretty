@@ -22,7 +22,7 @@ clipboard integration and desktop notifications.
 | Tabs / find / shortcuts | tab bar, full-scrollback find, GUI-editable key bindings |
 | IME | native Wayland text-input-v3; X11 XIM fallback; per-app Fcitx state is preserved |
 | Tiling, transparency, blur | working tiling panes; native KWin Wayland `ext_background_effect_v1` + X11 per-pixel ARGB alpha with real blur |
-| Packages | deb, rpm and relocatable tar.gz with desktop entry, icon, man page and terminfo |
+| Packages | Flatpak, deb, rpm and relocatable tar.gz with desktop entry, icon, man page and terminfo |
 | License | GPL-3.0-or-later; bundled fonts remain OFL-1.1 |
 
 See [docs/KITTY-COMPAT.md](docs/KITTY-COMPAT.md) for the item-by-item protocol
@@ -88,6 +88,24 @@ matrix, [docs/TEST-REPORT.md](docs/TEST-REPORT.md) for real-hardware evidence an
 - Cursor blinking is controlled by `cursor_blink`; it intentionally overrides a
   terminal `DECSCUSR` steady style. The off phase draws a dim outline rather than
   making the cursor vanish entirely.
+
+## Flatpak
+
+A single-file Flatpak bundle is produced by:
+
+```bash
+cargo build --release -p pretty-app
+cp target/release/pretty .portable-pretty   # optional; or pass PRETTY_FLATPAK_BIN
+scripts/build-flatpak.sh
+# dist/pretty-0.1.0-x86_64.flatpak
+flatpak install --user ./dist/pretty-0.1.0-x86_64.flatpak
+flatpak run io.github.mappingAu.Pretty
+```
+
+The app uses `org.freedesktop.Platform//25.08`, Wayland/X11 fallback, DRIs,
+home access, network access and notifications. A Noto CJK face is bundled because the
+freedesktop runtime does not ship one. The Flatpak build is a packaging-only
+check for this iteration; it was not installed or launched.
 
 ## Build
 

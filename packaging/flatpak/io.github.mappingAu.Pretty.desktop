@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=Pretty
+Comment=Hardware-accelerated terminal emulator
+Exec=pretty
+TryExec=pretty
+Icon=pretty
+Terminal=false
+Type=Application
+Categories=System;TerminalEmulator;
+Keywords=terminal;shell;console;kitty;vulkan;
+StartupNotify=true

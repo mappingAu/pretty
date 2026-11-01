@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.mappingAu.Pretty</id>
+  <name>Pretty</name>
+  <summary>Hardware-accelerated terminal emulator with kitty protocol support</summary>
+  <description>
+    <p>Pretty is a GPU-rendered terminal emulator with Vulkan and OpenGL ES
+    backends, kitty graphics and keyboard protocols, tabs, tiling panes,
+    full-scrollback search and native Wayland/KWin blur.</p>
+  </description>
+  <project_license>GPL-3.0-or-later</project_license>
+  <launchable type="desktop-id">io.github.mappingAu.Pretty.desktop</launchable>
+  <url type="homepage">https://github.com/mappingAu/pretty</url>
+  <developer_name>Pretty Authors</developer_name>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.0" date="2026-11-01"/>
+  </releases>
+</component>

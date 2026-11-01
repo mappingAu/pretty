@@ -88,6 +88,23 @@ installation.
 
 ![Extracted tar.gz running directly](screenshots/package-tar.png)
 
+## Flatpak
+
+`scripts/build-flatpak.sh` creates a single-file app bundle from the portable
+binary (`PRETTY_FLATPAK_BIN`, or `.portable-pretty` / `target/release/pretty`) and
+the existing desktop/icon/man/terminfo assets:
+
+```bash
+scripts/build-flatpak.sh
+# dist/pretty-0.1.0-x86_64.flatpak
+```
+
+The bundle declares `org.freedesktop.Platform/x86_64/25.08`, bundles Noto CJK for
+Chinese UI/terminal fallback, and requests `--socket=wayland`,
+`--socket=fallback-x11`, `--device=dri`, `--filesystem=home`, IPC, network and
+notifications. No Flatpak installation or launch is performed by the build
+script; this iteration was packaging-only as requested.
+
 ## Final verification summary
 
 `scripts/verify-packages.sh` finished with **0 failures** on the artifacts in
