@@ -1,0 +1,26 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: Pretty
+Upstream-Contact: Pretty Authors <dev@pretty.local>
+Source: https://github.com/mappingAu/pretty
+
+Files: *
+Copyright: 2026 Pretty Authors
+License: GPL-3.0-or-later
+ This package is free software: you can redistribute it and/or modify it under
+ the terms of the GNU General Public License as published by the Free Software
+ Foundation, either version 3 of the License, or (at your option) any later
+ version.
+ .
+ This package is distributed in the hope that it will be useful, but WITHOUT
+ ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+ FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+ .
+ On Debian systems, the complete text of the GNU General Public License version
+ 3 can be found in /usr/share/common-licenses/GPL-3. The project also ships its
+ own copy as /usr/share/doc/pretty/LICENSE.
+
+Files: assets/fonts/* assets/licenses/*
+Copyright: JetBrains s.r.o.; The Noto Project Authors
+License: OFL-1.1
+ Bundled font license texts are installed under
+ /usr/share/doc/pretty/licenses/.

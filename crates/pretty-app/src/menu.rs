@@ -8,6 +8,8 @@ pub enum ContextAction {
     Paste,
     SelectAll,
     Clear,
+    Find,
+    NewTab,
     SplitRight,
     SplitDown,
     ClosePane,
@@ -58,7 +60,13 @@ pub fn show(
                     if item(ui, true, "Clear screen", "") {
                         action = Some(ContextAction::Clear);
                     }
+                    if item(ui, true, "Find", "Ctrl+Shift+F") {
+                        action = Some(ContextAction::Find);
+                    }
                     ui.separator();
+                    if item(ui, true, "New tab", "Ctrl+Shift+T") {
+                        action = Some(ContextAction::NewTab);
+                    }
                     if item(ui, true, "Split right", "Ctrl+Shift+E") {
                         action = Some(ContextAction::SplitRight);
                     }

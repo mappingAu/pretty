@@ -49,7 +49,8 @@ for doc in KITTY-COMPAT.md TEST-REPORT.md RENDERER.md ARCHITECTURE.md KNOWN-ISSU
   install -m 0644 "docs/$doc" "$STAGE/usr/share/doc/pretty/$doc"
 done
 cp -a assets/licenses/. "$STAGE/usr/share/doc/pretty/licenses/"
-cp LICENSE-MIT LICENSE-APACHE "$STAGE/usr/share/doc/pretty/"
+cp LICENSE "$STAGE/usr/share/doc/pretty/"
+install -m 0644 packaging/deb/copyright "$STAGE/usr/share/doc/pretty/copyright"
 find "$STAGE" -type f -exec sha256sum {} + | sort -k2 > "$BUILD/package-sha256.txt"
 
 echo "==> building deb"
@@ -80,6 +81,7 @@ mkdir -p "$TARROOT/docs/licenses"
 for doc in KITTY-COMPAT.md TEST-REPORT.md RENDERER.md ARCHITECTURE.md KNOWN-ISSUES.md PACKAGING.md; do cp "docs/$doc" "$TARROOT/docs/$doc"; done
 cp README.md "$TARROOT/docs/README.md"
 cp -a assets/licenses/. "$TARROOT/docs/licenses/"
+cp LICENSE "$TARROOT/"
 cp packaging/install.sh "$TARROOT/install.sh"
 chmod +x "$TARROOT/install.sh"
 # Relocatable tar layout: bin/ and share/ at top level.

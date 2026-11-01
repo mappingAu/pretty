@@ -126,7 +126,10 @@ fn ensure_terminfo() {
 /// display exists and Fcitx is actually running.
 #[cfg(target_os = "linux")]
 fn prepare_x11_ime() {
-    if std::env::var_os("XMODIFIERS").is_some() || std::env::var_os("DISPLAY").is_none() {
+    if std::env::var_os("WAYLAND_DISPLAY").is_some()
+        || std::env::var_os("XMODIFIERS").is_some()
+        || std::env::var_os("DISPLAY").is_none()
+    {
         return;
     }
     let running = std::process::Command::new("fcitx5-remote")
@@ -234,24 +237,19 @@ fn main() -> ExitCode {
         }
     };
 
-    // KWin's blur-behind property is only available to X11 windows. winit 0.30
-    // selects Wayland whenever WAYLAND_DISPLAY is set, so temporarily clear it
-    // to select XWayland when blur is requested. This is explicit in config and
-    // documented; native Wayland remains available with blur disabled.
+    // GLES still uses XWayland on this driver. Vulkan stays on native Wayland
+    // so winit/IME use text-input-v3 (Fcitx's normal candidate popup) and KWin
+    // can blur through the org_kde_kwin_blur protocol. The former
+    // prefer_x11_for_blur switch is retained only for config compatibility.
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     {
         let gles_on_x11 = renderer == RendererKind::Gles;
-        let blur_needs_x11 = config.blur && config.prefer_x11_for_blur;
-        if (gles_on_x11 || blur_needs_x11)
+        if gles_on_x11
             && std::env::var_os("DISPLAY").is_some()
             && std::env::var_os("WAYLAND_DISPLAY").is_some()
         {
             std::env::remove_var("WAYLAND_DISPLAY");
-            if gles_on_x11 {
-                log::info!("GLES backend selected; using X11/XWayland window surface (native Wayland EGL presentation is not supported by this driver)");
-            } else {
-                log::info!("selecting winit X11 backend for compositor blur-behind");
-            }
+            log::info!("GLES backend selected; using X11/XWayland window surface (native Wayland EGL presentation is not supported by this driver)");
         }
     }
 

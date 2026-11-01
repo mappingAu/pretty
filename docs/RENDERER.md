@@ -107,7 +107,8 @@ background alpha = configured opacity, text/image alpha = 1, transparent clear.
 It removes `_NET_WM_WINDOW_OPACITY` and keeps
 `_KDE_NET_WM_BLUR_BEHIND_REGION`, so KWin blurs the alpha background while
 foreground text remains opaque. This path works for Vulkan and GLES. Native
-Wayland surfaces use the native PreMultiplied alpha path instead.
+Wayland surfaces use the PreMultiplied alpha path and request KWin blur with
+`ext_background_effect_manager_v1`; no X11 window properties are involved.
 
 ## 4. Pipelines and rendering order
 

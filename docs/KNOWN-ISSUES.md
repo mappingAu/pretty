@@ -10,9 +10,11 @@ renderer or represent a compile-only stub as a supported platform.
   event path is used by winit, but the physical gesture calibration (edge
   coordinates, palm rejection and two-finger momentum) should be checked
   interactively.
-- **IME auto-configuration targets Fcitx5.** If the session uses IBus or a
-  different XIM server, set `XMODIFIERS` explicitly. The candidate window is
-  drawn by the input method; Pretty only provides the cursor area and commits.
+- **IME auto-configuration targets Fcitx5.** Native Wayland uses text-input-v3
+  and Fcitx's normal candidate popup; the X11/XWayland fallback uses XIM. If the
+  session uses IBus or a different XIM server, set `XMODIFIERS` explicitly. The
+  candidate window is drawn by the input method; Pretty only supplies the cursor
+  area/preedit overlay and commits.
 - **Chinese UI needs a CJK system font.** Pretty inserts a system font into
   egui when found; a minimal container without Noto CJK/WenQuanYi will show
   missing-glyph boxes for Chinese labels. This does not affect terminal text
@@ -36,17 +38,17 @@ renderer or represent a compile-only stub as a supported platform.
    (`EGL_NATIVE_RENDERABLE` absent; `eglCreateWindowSurface` fails). Pretty
    therefore clears `WAYLAND_DISPLAY` when the GLES backend is selected and uses
    an X11 surface. Native Wayland GLES is not usable. Vulkan works on native
-   Wayland when blur is disabled.
+   Wayland with KWin blur via `ext_background_effect_v1`.
 2. **GLES requires the vendored wgpu-hal GLES patch.** Upstream wgpu would pick
    desktop OpenGL on this EGL implementation. See `docs/RENDERER.md` and
    `vendor/wgpu-hal`. This is a deliberate, documented local patch, not a silent
    fallback.
-3. **Compositor blur requires KDE Plasma + X11/XWayland.** Pretty sets
+3. **Compositor blur requires KDE Plasma.** Native Wayland uses
+   `ext_background_effect_manager_v1`; X11/XWayland sets
    `_KDE_NET_WM_BLUR_BEHIND_REGION` and uses a 32-bit ARGB client buffer with
-   per-pixel alpha; it removes `_NET_WM_WINDOW_OPACITY` so the alpha and blur
-   compose as one background layer. Other compositors may ignore the region or
-   client alpha; transparency may then degrade to opaque. The situation is
-   logged.
+   per-pixel alpha (removing `_NET_WM_WINDOW_OPACITY`). Other compositors may
+   ignore the protocol/region or client alpha; transparency may then degrade to
+   opaque. The situation is logged.
 4. **Vulkan X11 surface still reports Opaque compositing on this driver.** Pretty
    works around that by rendering an ARGB client buffer with per-pixel alpha on
    X11 (`PRETTY_PIXEL_ALPHA` is enabled automatically when opacity < 1); the
@@ -70,8 +72,9 @@ renderer or represent a compile-only stub as a supported platform.
    the previous placement (mpv's kitty VO pattern). `a=f`/`a=a` animation commands
    are still unsupported, and high-resolution video decode remains synchronous.
 9. **No damage-based partial redraw.** Every presented frame rebuilds solid and
-   text geometry for all panes. It is fast enough for the tested 124×39 grid in
-   release mode, but it is not the most efficient possible renderer.
+   text geometry for all panes. It is fast enough for the tested 129×37 grid
+   (tab bar included) in release mode, but it is not the most efficient possible
+   renderer.
 10. **Color emoji font.** The bundled Noto Color Emoji is COLRv1; the swash-based
     raster path currently falls back to monochrome Noto Emoji for most emoji.
     Colour bitmap fonts/COLRv0 are supported when available.

@@ -102,7 +102,7 @@ pub fn show(
                     Tab::General => general(ui, &mut draft, info, lang, &mut changed),
                     Tab::Appearance => appearance(ui, &mut draft, lang, &mut changed),
                     Tab::Rendering => rendering(ui, &mut draft, info, lang, &mut changed),
-                    Tab::Keyboard => keyboard(ui, info, lang),
+                    Tab::Keyboard => keyboard(ui, &mut draft, info, lang, &mut changed),
                     Tab::About => about(ui, version, info, lang),
                 }
             });
@@ -266,7 +266,6 @@ fn appearance(ui: &mut egui::Ui, cfg: &mut Config, lang: Lang, changed: &mut boo
     });
     ui.separator();
     ui.heading(tr(lang, "Configuration UI"));
-    ui.label(tr(lang, "The settings overlay is themed separately and can be customised:"));
     egui::Grid::new("ui-grid").num_columns(2).spacing([14.0, 10.0]).show(ui, |ui| {
         ui.label(tr(lang, "UI accent"));
         *changed |= color_row(ui, &mut cfg.ui_accent);
@@ -278,9 +277,6 @@ fn appearance(ui: &mut egui::Ui, cfg: &mut Config, lang: Lang, changed: &mut boo
         ui.end_row();
     });
     ui.add_space(4.0);
-    if ui.checkbox(&mut cfg.prefer_x11_for_blur, tr(lang, "Prefer X11/XWayland for compositor blur (restart required)")).changed() {
-        *changed = true;
-    }
 }
 
 fn rendering(
@@ -346,11 +342,15 @@ fn rendering(
         ui.add_space(6.0);
         ui.colored_label(egui::Color32::from_rgb(240, 190, 90), note);
     }
-    ui.add_space(8.0);
-    ui.label(tr(lang, "Vulkan and OpenGL ES 3.0+ are implemented. Metal and Direct3D are reserved interface stubs and are never silently selected."));
 }
 
-fn keyboard(ui: &mut egui::Ui, info: &RuntimeInfo<'_>, lang: Lang) {
+fn keyboard(
+    ui: &mut egui::Ui,
+    cfg: &mut Config,
+    info: &RuntimeInfo<'_>,
+    lang: Lang,
+    changed: &mut bool,
+) {
     ui.heading(tr(lang, "Kitty keyboard protocol"));
     ui.label(format!("{}: 0b{:05b} ({})", tr(lang, "Negotiated flags"), info.kitty_flags, info.kitty_flags));
     ui.label(format!("  {}", tr(lang, "bit 1: disambiguate escape codes")));
@@ -359,19 +359,44 @@ fn keyboard(ui: &mut egui::Ui, info: &RuntimeInfo<'_>, lang: Lang) {
     ui.label(format!("  {}", tr(lang, "bit 4: report all keys as escape codes")));
     ui.label(format!("  {}", tr(lang, "bit 5: report associated text")));
     ui.add_space(10.0);
-    ui.heading(tr(lang, "Pretty shortcuts"));
+    ui.heading(tr(lang, "Shortcuts"));
+    ui.label(tr(lang, "Edit a binding as Ctrl+Shift+T, Ctrl+, or Alt+Arrow. Changes apply immediately."));
+    egui::Grid::new("shortcuts-grid")
+        .num_columns(2)
+        .spacing([14.0, 6.0])
+        .show(ui, |ui| {
+            for (action, label) in [
+                ("new_tab", "New tab"),
+                ("close_pane", "Close pane"),
+                ("split_right", "Split right"),
+                ("split_down", "Split down"),
+                ("next_tab", "Next tab"),
+                ("prev_tab", "Previous tab"),
+                ("find", "Find"),
+                ("copy", "Copy"),
+                ("paste", "Paste"),
+                ("select_all", "Select all"),
+                ("settings", "Settings"),
+                ("zoom_in", "Zoom in"),
+                ("zoom_out", "Zoom out"),
+                ("zoom_reset", "Reset zoom"),
+                ("quit", "Quit"),
+            ] {
+                ui.label(tr(lang, label));
+                let value = cfg.shortcuts.entry(action.to_owned()).or_default();
+                if ui.text_edit_singleline(value).changed() {
+                    *changed = true;
+                }
+                ui.end_row();
+            }
+        });
+    ui.add_space(8.0);
+    ui.heading(tr(lang, "Fixed navigation"));
     for (keys, action) in [
-        ("Ctrl+,", "Open/close this settings panel"),
-        ("Ctrl+Shift+E", "Split focused pane to the right"),
-        ("Ctrl+Shift+O", "Split focused pane down"),
-        ("Ctrl+Shift+W", "Close focused pane"),
         ("Alt+Arrow", "Focus neighbouring pane"),
-        ("Ctrl+Shift+C / V", "Copy selection / paste"),
         ("Shift+PageUp / PageDown", "Scroll history by page"),
         ("Ctrl+Shift+Up / Down", "Scroll history by line"),
-        ("Ctrl+Shift+Plus / Minus / 0", "Increase / decrease / reset font size"),
         ("Shift+Mouse", "Force local selection over mouse reporting"),
-        ("Ctrl+Shift+Q", "Quit Pretty"),
     ] {
         ui.horizontal(|ui| {
             ui.monospace(format!("{keys:28}"));
@@ -397,7 +422,7 @@ fn about(ui: &mut egui::Ui, version: &str, info: &RuntimeInfo<'_>, lang: Lang) {
         ui.label(format!("{:?}", info.gpu.wgpu_backend));
         ui.end_row();
         ui.label(tr(lang, "License"));
-        ui.label("MIT OR Apache-2.0; bundled fonts under OFL-1.1");
+        ui.label("GPL-3.0-or-later; bundled fonts under OFL-1.1");
         ui.end_row();
     });
     ui.add_space(8.0);
@@ -429,6 +454,15 @@ fn apply_style(ctx: &egui::Context, config: &Config) {
     visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, a);
     visuals.widgets.inactive.bg_fill = Color32::from_rgb(32, 43, 60);
     visuals.widgets.noninteractive.bg_fill = Color32::from_rgb(24, 32, 45);
+    // egui's dark defaults use a faint grey for button text. That made the
+    // context menu and tab-bar labels look blurred next to a terminal; use the
+    // same bright foreground for every interactive state.
+    let bright = Color32::from_rgb(232, 238, 248);
+    visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, bright);
+    visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, Color32::WHITE);
+    visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, Color32::WHITE);
+    visuals.widgets.open.fg_stroke = egui::Stroke::new(1.0, Color32::WHITE);
+    visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, bright);
     visuals.hyperlink_color = a;
     let panel_alpha = (config.ui_panel_opacity.clamp(0.5, 1.0) * 255.0) as u8;
     visuals.window_fill = Color32::from_rgba_unmultiplied(24, 31, 43, panel_alpha);
@@ -438,6 +472,10 @@ fn apply_style(ctx: &egui::Context, config: &Config) {
     ctx.set_theme(egui::ThemePreference::Dark);
     let mut style = (*ctx.style_of(egui::Theme::Dark)).clone();
     style.visuals = visuals;
+    // Settings toggles should be instantaneous. The window fade animation was
+    // the visible stutter (and, without a repaint source, could leave the panel
+    // stuck dim); keep all UI transitions at zero.
+    style.animation_time = 0.0;
     style.spacing.item_spacing = egui::vec2(8.0, 7.0);
     style.spacing.button_padding = egui::vec2(10.0, 5.0);
     style.visuals.window_corner_radius = egui::CornerRadius::same(8);

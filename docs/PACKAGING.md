@@ -8,7 +8,8 @@ tree:
 - `dist/pretty-0.1.0-linux-x86_64.tar.gz`
 
 Every artifact carries the `pretty` binary, desktop entry, scalable + PNG icons,
-man page, the `pretty` terminfo entry, documentation and bundled font licenses.
+man page, the `pretty` terminfo entry, documentation, the GPLv3 project license
+and bundled OFL font licenses.
 The deb and rpm install under `/usr`; the tarball is relocatable and includes
 `install.sh` and a direct `bin/pretty` launcher layout.
 
@@ -95,6 +96,23 @@ It verifies `dist/SHA256SUMS` first, installs the RPM, launches the installed
 RPM, extracts and launches the tarball, then installs and launches the deb in a
 clean Debian 12 container. Raw logs and screenshots are retained under
 `test-artifacts/packaging-*/`.
+
+### Latest UX/IME rebuild (2026-11-01 14:56 +08:00)
+
+After the native-Wayland IME, tabs/find, cursor and GPLv3 changes, the three
+artifacts were rebuilt from the same Debian 12 portable binary:
+
+```
+bfd35ae4d75634bcb7e1d246d851dedb93f0f3a40cbc724fba9f7e1e6fcd3542  pretty-0.1.0-linux-x86_64.tar.gz
+6a14b5035800aa035543067c67a51f47cee62a05c108277eebb0a16baab96c3a  pretty-terminal-0.1.0-1.fc44.x86_64.rpm
+0bdfa9a080f8d1986d1be46f1ff5653097c462ab418469301e36c438da285132  pretty-terminal_0.1.0_amd64.deb
+```
+
+The final RPM was reinstalled and launched on the GTX 1050 with native-Wayland
+blur and the new tab bar; the deb and tar payloads were extracted and executed.
+The full `verify-packages.sh` Debian-container pass above predates this UX
+rebuild; package dependencies and file layout are unchanged apart from the GPLv3
+`copyright`/`LICENSE` files.
 
 ## Host installation verification (Fedora 44 / KDE X11)
 

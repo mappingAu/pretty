@@ -330,6 +330,10 @@ The window is created with transparency support. The surface alpha mode is selec
 premultiplied when the surface uses a premultiplied mode. A configurable alpha (default
 `0.88`) makes the desktop visible through the terminal.
 
+On native Wayland, Pretty binds `ext_background_effect_manager_v1` from KWin
+and asks for a whole-surface blur region. Winit supplies text-input-v3 on the
+same surface, so Fcitx uses its normal candidate popup.
+
 On KDE Plasma under X11/XWayland the app sets
 `_KDE_NET_WM_BLUR_BEHIND_REGION` via x11rb and uses a 32-bit ARGB client buffer.
 Although this NVIDIA Vulkan surface reports `Opaque` compositing, the X11 pixmap
@@ -344,8 +348,9 @@ never fakes blur in its own renderer.
 
 ### 4.7 Configuration UI
 
-A custom egui overlay provides General / Appearance / Keyboard / Rendering pages. It is
-rendered into the same swapchain after terminal content. Changing font size, theme colors,
+A custom egui overlay provides General / Appearance / Rendering / Keyboard / About
+pages, including a tab bar, full-scrollback find window, and editable shortcut
+bindings. It is rendered into the same swapchain after terminal content. Changing font size, theme colors,
 opacity, cursor shape, tiling gaps or scrollback applies live; renderer backend changes are
 saved and require a restart (clearly displayed). The overlay theme (accent, panel opacity,
 corner radius) is itself configurable, satisfying the custom configuration-UI requirement.

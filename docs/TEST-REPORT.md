@@ -1,7 +1,7 @@
 # Pretty — real-hardware test report
 
-**Test run:** `hardware-20261101-123811` (final harness run)
-**Date:** 2026-11-01 12:36–12:40 +08:00
+**Test run:** `hardware-20261101-144029` (final harness run)
+**Date:** 2026-11-01 14:40–14:42 +08:00
 **Host:** Fedora Linux 44, kernel 7.2.11-200.fc44.x86_64
 **Session:** KDE Plasma Wayland, Pretty forced to XWayland/X11 for KWin blur and GLES
 **Result: 0 failures** across the automated hardware suite. The run includes
@@ -23,7 +23,7 @@ blur/transparency capture.
 | GLES | OpenGL ES 3.2 NVIDIA 580.178.04 |
 | OS | Fedora 44, x86_64 |
 
-Raw evidence: `test-artifacts/hardware-20261101-123811/hardware.txt` and
+Raw evidence: `test-artifacts/hardware-20261101-144029/hardware.txt` and
 `print-info.txt`.
 
 ## Backend selection logs
@@ -193,8 +193,8 @@ not an automated every-subtest pass. `esctest` was not installed; see
 | Cursor shapes (block/underline/bar) | PASS | shape log + screenshots |
 | vttest menu + cursor test | PASS | vttest screenshots |
 | Font zoom (Ctrl+Shift+Plus) | PASS | `zoom.png`; grid reflow verified |
-| Benchmark Vulkan | PASS | 180 frames, 141×40 grid, 59.9 fps, p95 17.85 ms |
-| Benchmark GLES | PASS | 180 frames, 141×40 grid, 60.0 fps, p95 17.91 ms |
+| Benchmark Vulkan | PASS | 180 frames, 129×37 grid, 59.6 fps, p95 19.22 ms |
+| Benchmark GLES | PASS | 180 frames, 129×37 grid, 59.7 fps, p95 20.92 ms |
 
 ### Benchmark method
 
@@ -202,17 +202,18 @@ not an automated every-subtest pass. `esctest` was not installed; see
 1.2 s warm-up, measures the interval between presented frames in release builds,
 ignores the first frame, reports average and p95, and exits. Both runs used
 `Fifo` vsync. The workload is `assets/demo/bench.sh`: 80×24 coloured characters
-with ligatures on a 141×40 grid, i.e. more cells than the 80×24 requirement.
+with ligatures on a 129×37 grid (the tab bar reserves 30 logical px), still far
+more cells than the 80×24 requirement.
 
 Exact lines from the final run:
 
 ```
-BENCHMARK RESULT backend=Vulkan ... frames=180 avg_frame_ms=16.68 p95_frame_ms=17.85 avg_fps=59.9 grid=141x40
-BENCHMARK RESULT backend=Gles ... frames=180 avg_frame_ms=16.67 p95_frame_ms=17.91 avg_fps=60.0 grid=141x40
+BENCHMARK RESULT backend=Vulkan ... frames=180 avg_frame_ms=16.79 p95_frame_ms=19.22 avg_fps=59.6 grid=129x37
+BENCHMARK RESULT backend=Gles ... frames=180 avg_frame_ms=16.74 p95_frame_ms=20.92 avg_fps=59.7 grid=129x37
 ```
 
-Both are at the 60 Hz vsync cadence with no tearing; average is 59.9/60.0 fps.
-The run exceeds the requested 80×24 by more than 2× in cell count.
+Both are at the 60 Hz vsync cadence with no tearing; average is 59.6/59.7 fps.
+The run exceeds the requested 80×24 by roughly 2× in cell count.
 
 ## Cross-compilation
 
@@ -340,8 +341,8 @@ mouse reporting enabled) opens the native egui context menu:
 
 ![Right-click context menu](screenshots/ux-context-menu.png)
 
-The menu provides copy, paste, select all, clear, split-right/down, close pane,
-settings and quit. Disabled copy is visibly greyed out when there is no
+The menu provides copy, paste, select all, clear, find, new tab,
+split-right/down, close pane, settings and quit. Disabled copy is visibly greyed out when there is no
 selection.
 
 The UI is now localised without a new runtime dependency. The system locale is
@@ -366,13 +367,60 @@ candidate UI should still be checked interactively by the user. The mpv test
 used a generated testsrc video; other codecs and very large videos may exercise
 different frame sizes, but the image/table limits are independent of codec.
 
+## Native Wayland IME, tabs, find and cursor blink
+
+The default Vulkan path now stays on **native Wayland**. This was necessary for
+IME correctness: winit uses text-input-v3, so Fcitx's compact candidate popup is
+the same one Chromium/Konsole get, rather than an XIM fallback. KWin blur is
+requested through `ext_background_effect_manager_v1`; the log shows
+`KWin Wayland compositor blur enabled (ext_background_effect_v1)`. The X11
+whole-window-opacity path remains the fallback.
+
+Synthetic uinput input (`fcitx5-remote -s pinyin` + Ctrl+Space) produced this
+candidate popup in native Wayland Pretty:
+
+![Native Wayland Fcitx candidate](screenshots/ux-ime-native.png)
+
+The preedit in that synthetic capture contains a stray Ctrl+Space control
+character; the candidate layout and positioning are the important part.
+
+Tabs, full-scrollback find and the GUI shortcut editor:
+
+![Tabs](screenshots/ux-tabs.png)
+![Find over scrollback](screenshots/ux-find.png)
+![Settings / shortcut editor](screenshots/ux-shortcuts.png)
+
+The blink test captures ten frames 90 ms apart and records the cursor switching
+between the filled block and the dim outline. Animated evidence:
+
+![Cursor blink animation](screenshots/ux-cursor-blink.gif)
+
+`cursor_blink = true` now wins over a shell's `DECSCUSR` steady style; the timer
+is independent of the terminal cursor style. The prior implementation consulted
+`cursor_style().blinking`, which some prompts cleared.
+
+Other measured UX polish:
+
+- Warm window-map startup on this host dropped from about **82 ms** (previous
+  portable binary) to **61 ms** with the fast CJK-font path and native Wayland.
+  The CJK fallback log reports the load time (about 45 ms including TTC face
+  selection).
+- Settings window fade and all egui transitions were disabled
+  (`animation_time = 0.0`), and config application/disk writes are debounced by
+  220 ms. Dragging a setting no longer saves and resizes the PTY every frame.
+- Terminal glyphs are snapped to physical pixels and the glyph atlas uses
+  nearest sampling, removing the fractional-cell blur.
+- The context menu/button foreground is brightened; the right-click menu now has
+  higher contrast.
+
 ## Known test limitations
 
 - Only one NVIDIA GPU is available, so the GLES test uses the same GPU through
   a different real API rather than a separate integrated GPU.
-- The X11 Vulkan surface exposes only Opaque composite alpha, so transparency
-  is applied by the compositor window property; the client screenshot does not
-  show compositor alpha, while the full desktop capture does.
+- The X11 Vulkan surface advertises only Opaque composite alpha; Pretty works
+  around it with an ARGB client buffer and KWin blur. Native Wayland uses a
+  PreMultiplied surface and `ext_background_effect_v1`. Client screenshots do not
+  contain the compositor background; full desktop captures do.
 - vttest is interactive and not fully scripted; esctest was unavailable.
 - Android/macOS/Windows were compile-checked only; see CROSS-COMPILE.md.
 - Package installs were tested separately; see PACKAGING.md.

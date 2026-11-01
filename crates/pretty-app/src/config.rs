@@ -1,5 +1,6 @@
 //! Pretty configuration model and persistence.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use pretty_core::Rgb;
@@ -35,6 +36,8 @@ pub struct Config {
     pub ui_panel_opacity: f32,
     pub prefer_x11_for_blur: bool,
     pub cursor_blink: bool,
+    /// Action name -> key binding, e.g. `new_tab = "Ctrl+Shift+T"`.
+    pub shortcuts: HashMap<String, String>,
     /// UI language: `auto`, `en`, or `zh-CN`.
     pub language: String,
 }
@@ -66,8 +69,9 @@ impl Default for Config {
             window_height: 820,
             ui_accent: "#7aa2f7".into(),
             ui_panel_opacity: 1.0,
-            prefer_x11_for_blur: true,
+            prefer_x11_for_blur: false,
             cursor_blink: true,
+            shortcuts: default_shortcuts(),
             language: "auto".into(),
         }
     }
@@ -105,6 +109,10 @@ impl Config {
         t
     }
 
+    pub fn shortcut(&self, action: &str) -> Option<&str> {
+        self.shortcuts.get(action).map(String::as_str)
+    }
+
     pub fn validate(&mut self) {
         self.font_size = self.font_size.clamp(7.0, 42.0);
         self.line_height = self.line_height.clamp(0.85, 1.8);
@@ -129,6 +137,9 @@ impl Config {
             log::warn!("invalid renderer '{}'; falling back to auto", self.renderer);
             self.renderer = "auto".into();
         }
+        for (action, binding) in default_shortcuts() {
+            self.shortcuts.entry(action).or_insert(binding);
+        }
         for (name, value) in [
             ("background", &self.background),
             ("foreground", &self.foreground),
@@ -143,6 +154,29 @@ impl Config {
             }
         }
     }
+}
+
+pub fn default_shortcuts() -> HashMap<String, String> {
+    [
+        ("copy", "Ctrl+Shift+C"),
+        ("paste", "Ctrl+Shift+V"),
+        ("select_all", "Ctrl+Shift+A"),
+        ("new_tab", "Ctrl+Shift+T"),
+        ("close_pane", "Ctrl+Shift+W"),
+        ("split_right", "Ctrl+Shift+E"),
+        ("split_down", "Ctrl+Shift+O"),
+        ("find", "Ctrl+Shift+F"),
+        ("settings", "Ctrl+,"),
+        ("next_tab", "Ctrl+Tab"),
+        ("prev_tab", "Ctrl+Shift+Tab"),
+        ("quit", "Ctrl+Shift+Q"),
+        ("zoom_in", "Ctrl+Shift+="),
+        ("zoom_out", "Ctrl+Shift+-"),
+        ("zoom_reset", "Ctrl+Shift+0"),
+    ]
+    .into_iter()
+    .map(|(a, b)| (a.to_string(), b.to_string()))
+    .collect()
 }
 
 pub fn parse_color(s: &str, fallback: Rgb) -> Rgb {

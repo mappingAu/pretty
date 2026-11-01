@@ -55,6 +55,119 @@ struct Pane {
     rows: usize,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Shortcut {
+    ctrl: bool,
+    shift: bool,
+    alt: bool,
+    super_key: bool,
+    key: String,
+}
+
+impl Shortcut {
+    fn parse(binding: &str) -> Option<Self> {
+        let mut out = Self {
+            ctrl: false,
+            shift: false,
+            alt: false,
+            super_key: false,
+            key: String::new(),
+        };
+        for part in binding.split('+').map(str::trim).filter(|p| !p.is_empty()) {
+            match part.to_ascii_lowercase().as_str() {
+                "ctrl" | "control" => out.ctrl = true,
+                "shift" => out.shift = true,
+                "alt" | "option" => out.alt = true,
+                "super" | "meta" | "win" | "cmd" => out.super_key = true,
+                _ => out.key = normalize_shortcut_key(part),
+            }
+        }
+        if out.key.is_empty() {
+            None
+        } else {
+            Some(out)
+        }
+    }
+
+    fn from_event(
+        event: &winit::event::KeyEvent,
+        modifiers: ModifiersState,
+    ) -> Option<Self> {
+        let key = match event.logical_key.as_ref() {
+            WinitKey::Character(s) => normalize_shortcut_key(s),
+            WinitKey::Named(WinitNamedKey::Tab) => "tab".into(),
+            WinitKey::Named(WinitNamedKey::ArrowUp) => "up".into(),
+            WinitKey::Named(WinitNamedKey::ArrowDown) => "down".into(),
+            WinitKey::Named(WinitNamedKey::ArrowLeft) => "left".into(),
+            WinitKey::Named(WinitNamedKey::ArrowRight) => "right".into(),
+            WinitKey::Named(WinitNamedKey::PageUp) => "pageup".into(),
+            WinitKey::Named(WinitNamedKey::PageDown) => "pagedown".into(),
+            WinitKey::Named(WinitNamedKey::Escape) => "escape".into(),
+            WinitKey::Named(WinitNamedKey::Enter) => "enter".into(),
+            _ => return None,
+        };
+        Some(Self {
+            ctrl: modifiers.control_key(),
+            shift: modifiers.shift_key(),
+            alt: modifiers.alt_key(),
+            super_key: modifiers.super_key(),
+            key,
+        })
+    }
+}
+
+fn normalize_shortcut_key(key: &str) -> String {
+    match key.to_ascii_lowercase().as_str() {
+        "+" | "equal" => "=".into(),
+        "_" | "minus" => "-".into(),
+        " " | "space" => "space".into(),
+        "esc" => "escape".into(),
+        "return" => "enter".into(),
+        other => other.trim().to_string(),
+    }
+}
+
+const SHORTCUT_ACTIONS: &[(&str, &str)] = &[
+    ("new_tab", "New tab"),
+    ("close_pane", "Close pane"),
+    ("split_right", "Split right"),
+    ("split_down", "Split down"),
+    ("next_tab", "Next tab"),
+    ("prev_tab", "Previous tab"),
+    ("find", "Find"),
+    ("copy", "Copy"),
+    ("paste", "Paste"),
+    ("select_all", "Select all"),
+    ("settings", "Settings"),
+    ("zoom_in", "Zoom in"),
+    ("zoom_out", "Zoom out"),
+    ("zoom_reset", "Reset zoom"),
+    ("quit", "Quit"),
+];
+
+#[derive(Clone)]
+struct Tab {
+    layout: Layout,
+    focused: PaneId,
+    title: String,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum TabAction {
+    Activate(usize),
+    New,
+    Close(usize),
+    Find,
+}
+
+#[derive(Default)]
+struct SearchState {
+    open: bool,
+    query: String,
+    matches: Vec<(usize, usize, usize)>, // row, start col, length
+    current: usize,
+}
+
 struct MouseState {
     position: Option<PhysicalPosition<f64>>,
     button: Option<pretty_core::MouseButton>,
@@ -97,9 +210,13 @@ pub struct PrettyApp {
     egui_ctx: egui::Context,
     egui_state: Option<egui_winit::State>,
     settings: SettingsState,
+    settings_was_open: bool,
+    settings_anim_until: Option<Instant>,
     panes: HashMap<PaneId, Pane>,
     layout: Layout,
     focused: PaneId,
+    tabs: Vec<Tab>,
+    active_tab: usize,
     next_pane: u64,
     #[cfg(not(target_os = "android"))]
     clipboard: Option<arboard::Clipboard>,
@@ -121,6 +238,7 @@ pub struct PrettyApp {
     benchmark: Option<Benchmark>,
     lang: Lang,
     context_menu: Option<egui::Pos2>,
+    search: SearchState,
     exit_requested: bool,
     drop_hover: Option<PathBuf>,
     ime_preedit: String,
@@ -163,9 +281,13 @@ impl PrettyApp {
             },
             egui_state: None,
             settings,
+            settings_was_open: false,
+            settings_anim_until: None,
             panes: HashMap::new(),
             layout: Layout::leaf(PaneId(0)),
             focused: PaneId(0),
+            tabs: Vec::new(),
+            active_tab: 0,
             next_pane: 1,
             #[cfg(not(target_os = "android"))]
             clipboard: None,
@@ -187,6 +309,7 @@ impl PrettyApp {
             benchmark,
             lang,
             context_menu: None,
+            search: SearchState::default(),
             exit_requested: false,
             drop_hover: None,
             ime_preedit: String::new(),
@@ -289,7 +412,10 @@ impl PrettyApp {
         self.window = Some(window.clone());
         window.set_ime_allowed(true);
 
-        if self.config.blur {
+        // X11 blur properties must be set before the window is mapped. The
+        // Wayland ext_background_effect object is created after the first
+        // frame, once winit has committed the surface (see draw()).
+        if self.config.blur && !platform::window_is_wayland(&window) {
             match platform::apply_compositor_effects(&window, self.config.blur, self.config.opacity) {
                 Ok(()) => log::debug!("compositor effects applied before map; will reapply after first frame"),
                 Err(e) => log::warn!("blur-behind unavailable: {e}"),
@@ -314,6 +440,12 @@ impl PrettyApp {
                 return;
             }
         }
+        self.tabs.push(Tab {
+            layout: self.layout.clone(),
+            focused: self.focused,
+            title: "Terminal 1".into(),
+        });
+        self.active_tab = 0;
         self.resize_all();
         self.update_title();
         self.window.as_ref().unwrap().request_redraw();
@@ -326,12 +458,18 @@ impl PrettyApp {
     fn layout_area(&self) -> Rect {
         let size = self.window.as_ref().map(|w| w.inner_size()).unwrap_or(PhysicalSize::new(1280, 800));
         let margin = (6.0 * self.scale_factor as f32).round();
+        let tab_h = self.tab_bar_height();
+        let top = margin + tab_h;
         Rect::new(
             margin,
-            margin,
+            top,
             (size.width as f32 - margin * 2.0).max(1.0),
-            (size.height as f32 - margin * 2.0).max(1.0),
+            (size.height as f32 - top - margin).max(1.0),
         )
+    }
+
+    fn tab_bar_height(&self) -> f32 {
+        (30.0 * self.scale_factor as f32).round()
     }
 
     fn pane_grid_size(&self, rect: Rect) -> (usize, usize) {
@@ -551,6 +689,160 @@ impl PrettyApp {
         }
     }
 
+    fn open_search(&mut self) {
+        log::info!("find overlay opened");
+        self.search.open = true;
+        self.search.current = 0;
+        self.egui_ctx
+            .memory_mut(|m| m.request_focus(egui::Id::new("pretty-search-input")));
+        self.refresh_search();
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
+    fn refresh_search(&mut self) {
+        self.search.matches.clear();
+        self.search.current = 0;
+        let query = self.search.query.to_lowercase();
+        if query.is_empty() {
+            if let Some(pane) = self.focused_pane_mut() {
+                pane.term.clear_selection();
+            }
+            return;
+        }
+        let Some(pane) = self.focused_pane_mut() else { return };
+        let mut found: Vec<(usize, usize, usize)> = Vec::new();
+        let saved_offset = pane.term.display_offset();
+        let history = pane.term.history_size();
+        let rows = pane.rows.max(1);
+        let cols = pane.cols;
+        pane.term.scroll_to_top();
+        loop {
+            let frame = pane.term.snapshot();
+            let base = history.saturating_sub(frame.display_offset);
+            for row in 0..frame.rows {
+                let mut line = String::new();
+                let mut char_cols = Vec::new();
+                for col in 0..cols {
+                    let Some(cell) = frame.cell(row, col) else { break };
+                    if cell.wide_spacer {
+                        continue;
+                    }
+                    for ch in std::iter::once(cell.c).chain(cell.zero_width.iter().copied()) {
+                        line.push(ch);
+                        char_cols.push(col);
+                    }
+                }
+                let lower = line.to_lowercase();
+                let mut from = 0;
+                while let Some(pos) = lower[from..].find(&query) {
+                    let start_char = from + pos;
+                    let end_char = start_char + query.len();
+                    let Some(&col) = char_cols.get(start_char) else { break };
+                    let len = end_char.saturating_sub(start_char).max(1);
+                    found.push((base + row, col, len));
+                    from = end_char;
+                    if from >= lower.len() { break; }
+                }
+            }
+            if frame.display_offset == 0 {
+                break;
+            }
+            pane.term.scroll_page_down();
+            if pane.term.display_offset() == frame.display_offset {
+                break;
+            }
+            if pane.term.display_offset() > history + rows {
+                break;
+            }
+        }
+        pane.term.scroll_to_bottom();
+        if saved_offset > 0 {
+            pane.term.scroll(saved_offset as i32);
+        }
+        self.search.matches = found;
+        if !self.search.matches.is_empty() {
+            self.select_search_match();
+        } else if let Some(pane) = self.focused_pane_mut() {
+            pane.term.clear_selection();
+        }
+    }
+
+    fn select_search_match(&mut self) {
+        let Some(&(global_line, col, len)) = self.search.matches.get(self.search.current) else { return };
+        let Some(pane) = self.focused_pane_mut() else { return };
+        let history = pane.term.history_size();
+        let delta = history.saturating_sub(global_line).min(history) as i32;
+        pane.term.scroll_to_bottom();
+        if delta > 0 {
+            pane.term.scroll(delta);
+        }
+        let row = global_line.saturating_sub(history.saturating_sub(pane.term.display_offset()));
+        pane.term.start_selection(row, col);
+        pane.term.update_selection(row, col.saturating_add(len.saturating_sub(1)));
+    }
+
+    fn next_search_match(&mut self) {
+        if self.search.matches.is_empty() {
+            return;
+        }
+        self.search.current = (self.search.current + 1) % self.search.matches.len();
+        self.select_search_match();
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
+    fn configured_shortcut(&self, event: &winit::event::KeyEvent) -> Option<&'static str> {
+        let pressed = Shortcut::from_event(event, self.modifiers)?;
+        for (action, _) in SHORTCUT_ACTIONS {
+            let Some(binding) = self.config.shortcut(action) else { continue };
+            if let Some(want) = Shortcut::parse(binding) {
+                if want == pressed {
+                    return Some(action);
+                }
+            }
+        }
+        None
+    }
+
+    fn run_shortcut(&mut self, action: &str) -> bool {
+        match action {
+            "copy" => self.copy_selection(),
+            "paste" => self.paste_clipboard(),
+            "select_all" => self.select_all(),
+            "new_tab" => self.new_tab(),
+            "close_pane" => self.close_pane(self.focused),
+            "split_right" => self.split_pane(pretty_core::Axis::Horizontal),
+            "split_down" => self.split_pane(pretty_core::Axis::Vertical),
+            "find" => self.open_search(),
+            "settings" => {
+                self.settings.open = !self.settings.open;
+                if self.settings.open {
+                    self.settings.sync(&self.config);
+                    self.settings.draft = self.config.clone();
+                }
+            }
+            "next_tab" => self.next_tab(1),
+            "prev_tab" => self.next_tab(-1),
+            "quit" => {
+                if let Some(w) = &self.window {
+                    w.set_visible(false);
+                }
+                std::process::exit(0);
+            }
+            "zoom_in" => self.adjust_font_size(1.0),
+            "zoom_out" => self.adjust_font_size(-1.0),
+            "zoom_reset" => {
+                self.config.font_size = 15.0;
+                self.config_changed();
+            }
+            _ => return false,
+        }
+        true
+    }
+
     fn handle_shortcut(&mut self, event: &winit::event::KeyEvent) -> bool {
         let ctrl = self.modifiers.control_key();
         let shift = self.modifiers.shift_key();
@@ -559,54 +851,23 @@ impl PrettyApp {
             return false;
         }
         let logical = event.logical_key.as_ref();
+        if self.search.open && matches!(logical, WinitKey::Named(WinitNamedKey::Escape)) {
+            self.search.open = false;
+            if let Some(pane) = self.focused_pane_mut() {
+                pane.term.clear_selection();
+            }
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+            return true;
+        }
+        if let Some(action) = self.configured_shortcut(event) {
+            if self.run_shortcut(action) {
+                return true;
+            }
+        }
         if ctrl && shift {
             match logical {
-                WinitKey::Character(s) => match s.to_ascii_lowercase().as_str() {
-                    "q" => {
-                        if let Some(w) = &self.window {
-                            w.set_visible(false);
-                        }
-                        std::process::exit(0);
-                    }
-                    "c" => {
-                        self.copy_selection();
-                        return true;
-                    }
-                    "v" => {
-                        self.paste_clipboard();
-                        return true;
-                    }
-                    "e" => {
-                        self.split_pane(pretty_core::Axis::Horizontal);
-                        return true;
-                    }
-                    "o" => {
-                        self.split_pane(pretty_core::Axis::Vertical);
-                        return true;
-                    }
-                    "w" => {
-                        self.close_pane(self.focused);
-                        return true;
-                    }
-                    "+" | "=" => {
-                        self.adjust_font_size(1.0);
-                        return true;
-                    }
-                    "-" | "_" => {
-                        self.adjust_font_size(-1.0);
-                        return true;
-                    }
-                    "0" => {
-                        self.config.font_size = 15.0;
-                        self.config_changed();
-                        return true;
-                    }
-                    "a" => {
-                        self.select_all();
-                        return true;
-                    }
-                    _ => {}
-                },
                 WinitKey::Named(WinitNamedKey::ArrowUp) => {
                     if let Some(p) = self.focused_pane_mut() {
                         p.term.scroll(1);
@@ -620,16 +881,6 @@ impl PrettyApp {
                     return true;
                 }
                 _ => {}
-            }
-        }
-        if ctrl && !shift {
-            if matches!(logical, WinitKey::Character(s) if s == ",") {
-                self.settings.open = !self.settings.open;
-                if self.settings.open {
-                    self.settings.sync(&self.config);
-                    self.settings.draft = self.config.clone();
-                }
-                return true;
             }
         }
         if shift && !ctrl {
@@ -681,6 +932,9 @@ impl PrettyApp {
     fn config_changed(&mut self) {
         self.config.validate();
         self.lang = Lang::from_setting(&self.config.language);
+        // Theme/compositor changes are cheap and should be visible while a
+        // slider moves. Expensive PTY resizing and disk writes are debounced:
+        // saving on every egui frame made dragging a toggle visibly stutter.
         if let Some(renderer) = self.renderer.as_mut() {
             if let Err(e) = renderer.set_theme(self.config.theme()) {
                 log::error!("failed to apply theme: {e}");
@@ -695,13 +949,115 @@ impl PrettyApp {
                 let _ = platform::apply_compositor_effects(window, false, self.config.opacity);
             }
         }
-        self.resize_all();
-        if let Err(e) = crate::config::save(&self.options.config_path, &self.config) {
-            log::warn!("failed to save config: {e}");
-        }
+        self.last_ui_change = Some(Instant::now());
+        self.pending_ui_apply = true;
         if let Some(w) = &self.window {
             w.request_redraw();
         }
+    }
+
+    fn save_active_tab(&mut self) {
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            tab.layout = self.layout.clone();
+            tab.focused = self.focused;
+            if let Some(pane) = self.panes.get(&self.focused) {
+                if !pane.title.is_empty() {
+                    tab.title = pane.title.clone();
+                }
+            }
+        }
+    }
+
+    fn load_active_tab(&mut self) {
+        if let Some(tab) = self.tabs.get(self.active_tab) {
+            self.layout = tab.layout.clone();
+            self.focused = tab.focused;
+            if !self.layout.contains(self.focused) {
+                self.focused = self.layout.leaves().first().copied().unwrap_or(PaneId(0));
+            }
+        }
+    }
+
+    fn new_tab(&mut self) {
+        self.save_active_tab();
+        let area = self.layout_area();
+        let id = PaneId(self.next_pane);
+        let rect = area;
+        match self.spawn_pane(id, rect) {
+            Ok(pane) => {
+                self.panes.insert(id, pane);
+                self.next_pane += 1;
+                self.layout = Layout::leaf(id);
+                self.focused = id;
+                let n = self.tabs.len() + 1;
+                self.tabs.push(Tab {
+                    layout: self.layout.clone(),
+                    focused: id,
+                    title: format!("Terminal {n}"),
+                });
+                self.active_tab = self.tabs.len() - 1;
+                self.resize_all();
+                self.update_title();
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+                log::info!("tab {n} opened");
+            }
+            Err(e) => log::error!("failed to open tab: {e}"),
+        }
+    }
+
+    fn activate_tab(&mut self, index: usize) {
+        if index >= self.tabs.len() || index == self.active_tab {
+            return;
+        }
+        self.save_active_tab();
+        self.active_tab = index;
+        self.load_active_tab();
+        self.resize_all();
+        self.update_title();
+        self.blink_on = true;
+        self.last_blink = Instant::now() + Duration::from_millis(530);
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
+    fn next_tab(&mut self, delta: isize) {
+        if self.tabs.len() < 2 {
+            return;
+        }
+        let n = self.tabs.len() as isize;
+        let next = (self.active_tab as isize + delta).rem_euclid(n) as usize;
+        self.activate_tab(next);
+    }
+
+    fn close_tab(&mut self, index: usize) {
+        if index >= self.tabs.len() {
+            return;
+        }
+        if self.tabs.len() == 1 {
+            if let Some(w) = &self.window {
+                w.set_visible(false);
+            }
+            std::process::exit(0);
+        }
+        let tab = self.tabs.remove(index);
+        for id in tab.layout.leaves() {
+            self.panes.remove(&id);
+        }
+        if self.active_tab >= self.tabs.len() {
+            self.active_tab = self.tabs.len() - 1;
+        } else if index < self.active_tab {
+            self.active_tab -= 1;
+        }
+        self.load_active_tab();
+        self.resize_all();
+        self.update_title();
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+        log::info!("tab closed");
     }
 
     fn split_pane(&mut self, axis: pretty_core::Axis) {
@@ -728,17 +1084,16 @@ impl PrettyApp {
                     w.request_redraw();
                 }
                 log::info!("pane {} split ({axis:?})", id.0);
+                self.save_active_tab();
             }
             Err(e) => log::error!("failed to create split pane: {e}"),
         }
     }
 
     fn close_pane(&mut self, id: PaneId) {
-        if self.panes.len() <= 1 {
-            if let Some(w) = &self.window {
-                w.set_visible(false);
-            }
-            std::process::exit(0);
+        if self.layout.leaves().len() <= 1 {
+            self.close_tab(self.active_tab);
+            return;
         }
         if self.layout.remove(id) {
             self.panes.remove(&id);
@@ -749,6 +1104,7 @@ impl PrettyApp {
             if let Some(w) = &self.window {
                 w.request_redraw();
             }
+            self.save_active_tab();
         }
     }
 
@@ -759,8 +1115,10 @@ impl PrettyApp {
         };
         let (cx, cy) = current.center();
         let mut best: Option<(PaneId, f32)> = None;
+        let active: std::collections::HashSet<PaneId> =
+            self.layout.leaves().into_iter().collect();
         for (id, pane) in &self.panes {
-            if *id == self.focused {
+            if *id == self.focused || !active.contains(id) {
                 continue;
             }
             let (px, py) = pane.rect.center();
@@ -787,6 +1145,7 @@ impl PrettyApp {
         if let Some((id, _)) = best {
             self.focused = id;
             self.update_title();
+            self.save_active_tab();
             if let Some(w) = &self.window {
                 w.request_redraw();
             }
@@ -985,7 +1344,7 @@ impl PrettyApp {
         if self.handle_shortcut(event) {
             return;
         }
-        if self.settings.open {
+        if self.settings.open || self.search.open {
             return;
         }
         if event.state == ElementState::Released {
@@ -1421,6 +1780,8 @@ impl PrettyApp {
             ContextAction::Paste => self.paste_clipboard(),
             ContextAction::SelectAll => self.select_all(),
             ContextAction::Clear => self.write_to_focused(b"\x0c"),
+            ContextAction::Find => self.open_search(),
+            ContextAction::NewTab => self.new_tab(),
             ContextAction::SplitRight => self.split_pane(pretty_core::Axis::Horizontal),
             ContextAction::SplitDown => self.split_pane(pretty_core::Axis::Vertical),
             ContextAction::ClosePane => self.close_pane(self.focused),
@@ -1508,6 +1869,28 @@ impl PrettyApp {
             .unwrap_or(false);
         let mut menu_open = self.context_menu;
         let mut menu_action = None;
+        let mut tab_action = None;
+        let tab_labels: Vec<String> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .map(|(i, tab)| {
+                self.panes
+                    .get(&tab.focused)
+                    .map(|p| p.title.clone())
+                    .filter(|t| !t.is_empty())
+                    .unwrap_or_else(|| format!("Terminal {}", i + 1))
+            })
+            .collect();
+        let active_tab = self.active_tab;
+        let mut search_query = self.search.query.clone();
+        let mut search_next = false;
+        let mut search_close = false;
+        let search_open = self.search.open;
+        let search_matches = self.search.matches.len();
+        let search_current = self.search.current;
+        let tab_bar_width = (window.inner_size().width as f64 / self.scale_factor - 128.0).max(160.0) as f32;
+        let tab_bar_margin = (6.0 * self.scale_factor as f32).round();
         let drop_hover = self.drop_hover.clone();
         let preedit = self.ime_preedit.clone();
         let ime_cursor = self.ime_cursor;
@@ -1515,6 +1898,50 @@ impl PrettyApp {
             let state = self.egui_state.as_mut()?;
             let raw_input = state.take_egui_input(&window);
             let output = self.egui_ctx.run_ui(raw_input, |root| {
+                tab_action = show_tab_bar(
+                    root.ctx(),
+                    &tab_labels,
+                    active_tab,
+                    tab_bar_margin,
+                    tab_bar_width,
+                );
+                if search_open {
+                    egui::Window::new(tr(lang, "Find"))
+                        .id(egui::Id::new("pretty-search"))
+                        .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 44.0))
+                                        .resizable(false)
+                        .collapsible(false)
+                        .show(root.ctx(), |ui| {
+                            ui.horizontal(|ui| {
+                                let response = ui.add(
+                                    egui::TextEdit::singleline(&mut search_query)
+                                        .id(egui::Id::new("pretty-search-input"))
+                                        .desired_width(220.0),
+                                );
+                                if !response.has_focus() {
+                                    response.request_focus();
+                                }
+                                if ui.button(tr(lang, "Next")).clicked() {
+                                    search_next = true;
+                                }
+                                if ui.button(tr(lang, "Close")).clicked() {
+                                    search_close = true;
+                                }
+                                if search_matches == 0 && !search_query.is_empty() {
+                                    ui.label(tr(lang, "No matches"));
+                                } else if search_matches > 0 {
+                                    ui.label(format!("{}/{}", search_current + 1, search_matches));
+                                }
+                                if response.changed() {
+                                    // refresh after the closure so the terminal
+                                    // selection can be updated safely.
+                                }
+                            });
+                            if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                                search_next = true;
+                            }
+                        });
+                }
                 changed = settings::show(
                     root.ctx(),
                     &mut self.settings,
@@ -1565,6 +1992,28 @@ impl PrettyApp {
         }
         if let Some(action) = menu_action {
             self.handle_context_action(action);
+        }
+        match tab_action {
+            Some(TabAction::Activate(i)) => self.activate_tab(i),
+            Some(TabAction::New) => self.new_tab(),
+            Some(TabAction::Close(i)) => self.close_tab(i),
+            Some(TabAction::Find) => self.open_search(),
+            None => {}
+        }
+        if search_open {
+            if search_query != self.search.query {
+                self.search.query = search_query;
+                self.refresh_search();
+            }
+            if search_next {
+                self.next_search_match();
+            }
+            if search_close {
+                self.search.open = false;
+                if let Some(pane) = self.focused_pane_mut() {
+                    pane.term.clear_selection();
+                }
+            }
         }
         if changed {
             self.config = self.settings.draft.clone();
@@ -1732,10 +2181,11 @@ impl PrettyApp {
             return;
         }
         if let Some(last) = self.last_ui_change {
-            if last.elapsed() < Duration::from_millis(300) {
+            if last.elapsed() < Duration::from_millis(220) {
                 return;
             }
         }
+        self.resize_all();
         if let Err(e) = crate::config::save(&self.options.config_path, &self.config) {
             log::warn!("failed to save config: {e}");
         }
@@ -1874,9 +2324,10 @@ impl ApplicationHandler<UserEvent> for PrettyApp {
                     self.blink_on = true;
                     self.last_blink = Instant::now();
                 }
-                if let Some(w) = &self.window {
-                    w.set_ime_allowed(focused);
-                }
+                // Do not toggle IME enabled state on focus. Re-enabling a XIM
+                // context makes Fcitx reset the active input method to its
+                // default (usually Chinese Pinyin) every time the window is
+                // refocused. Winit already switches input focus for us.
                 let bytes = if focused { b"\x1b[I".as_slice() } else { b"\x1b[O".as_slice() };
                 let reports = self
                     .panes
@@ -1909,13 +2360,11 @@ impl ApplicationHandler<UserEvent> for PrettyApp {
             event_loop.exit();
             return;
         }
-        let blinking = self
-            .panes
-            .get(&self.focused)
-            .map(|p| p.term.cursor_style().blinking)
-            .unwrap_or(false)
-            && self.config.cursor_blink
-            && !self.settings.open;
+        // The user-facing cursor_blink setting must win over a terminal
+        // DECSCUSR "steady" style: shells and full-screen programs often emit
+        // `CSI 2 q`, which previously left Blink permanently off. Timer
+        // scheduling is independent of the terminal's cursor style.
+        let blinking = self.config.cursor_blink && !self.settings.open;
         if blinking {
             let now = Instant::now();
             if now >= self.last_blink {
@@ -1930,11 +2379,46 @@ impl ApplicationHandler<UserEvent> for PrettyApp {
             event_loop.set_control_flow(winit::event_loop::ControlFlow::Wait);
         }
         self.apply_ui_changes_debounced();
+        if self.pending_ui_apply {
+            if let Some(last) = self.last_ui_change {
+                event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
+                    last + Duration::from_millis(220),
+                ));
+            }
+        }
+        // egui's window open/close animation needs frames to advance. The
+        // terminal's blink timer used to be the accidental repaint source; with
+        // the cursor hidden while settings are open that timer is disabled, so
+        // drive the short animation explicitly instead of leaving a dim/blank
+        // settings panel on screen.
+        let now = Instant::now();
+        if self.settings.open != self.settings_was_open {
+            self.settings_was_open = self.settings.open;
+            self.settings_anim_until = Some(now + Duration::from_millis(320));
+        }
+        if let Some(until) = self.settings_anim_until {
+            if now < until {
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+                event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
+                    now + Duration::from_millis(16),
+                ));
+            } else {
+                self.settings_anim_until = None;
+            }
+        }
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         // CLI overrides (--opacity/--font-size/--no-blur) are runtime-only and
-        // must not silently rewrite the user's persistent configuration.
+        // must not silently rewrite the user's persistent configuration. A UI
+        // edit made within the 220ms debounce window is still persisted.
+        if self.pending_ui_apply {
+            if let Err(e) = crate::config::save(&self.options.config_path, &self.config) {
+                log::warn!("failed to save config on exit: {e}");
+            }
+        }
     }
 }
 
@@ -2076,28 +2560,129 @@ fn shell_quote_path(path: &str) -> String {
 
 /// Load one CJK-capable system font into egui's fallback chain. egui ships
 /// Latin fonts only; without this the Chinese UI would render as tofu.
-fn install_ui_font(ctx: &egui::Context) {
+fn show_tab_bar(
+    ctx: &egui::Context,
+    labels: &[String],
+    active: usize,
+    margin: f32,
+    width: f32,
+) -> Option<TabAction> {
+    let mut action = None;
+    egui::Area::new(egui::Id::new("pretty-tabs"))
+        .order(egui::Order::Middle)
+        .fixed_pos(egui::pos2(margin, margin))
+        .show(ctx, |ui| {
+            egui::Frame::new()
+                .fill(egui::Color32::from_rgb(18, 24, 35))
+                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(45, 55, 72)))
+                .inner_margin(egui::Margin::symmetric(4, 2))
+                .show(ui, |ui| {
+                    ui.set_width(width);
+                    ui.horizontal(|ui| {
+                        for (i, label) in labels.iter().enumerate() {
+                            let text = format!("{}  {}", old_tab_label(i), label);
+                            if ui
+                                .selectable_label(i == active, text)
+                                .on_hover_text(label)
+                                .clicked()
+                            {
+                                action = Some(TabAction::Activate(i));
+                            }
+                            if labels.len() > 1 && ui.small_button("×").clicked() {
+                                action = Some(TabAction::Close(i));
+                            }
+                            ui.add_space(2.0);
+                        }
+                        if ui.button("+").on_hover_text("New tab (Ctrl+Shift+T)").clicked() {
+                            action = Some(TabAction::New);
+                        }
+                        if ui.button("Find").on_hover_text("Find (Ctrl+Shift+F)").clicked() {
+                            action = Some(TabAction::Find);
+                        }
+                    });
+                });
+        });
+    action
+}
+
+fn old_tab_label(index: usize) -> String {
+    format!("{}", index + 1)
+}
+
+fn cjk_face_index(path: &std::path::Path) -> u32 {
+    // TTC collections contain several regional faces; prefer the Simplified
+    // Chinese face when fontdb can identify it.
     let mut db = fontdb::Database::new();
-    db.load_system_fonts();
-    for name in [
-        "Noto Sans CJK SC",
-        "Noto Sans CJK",
-        "Droid Sans Fallback",
-        "WenQuanYi Micro Hei",
-        "Microsoft YaHei",
-        "PingFang SC",
-    ] {
+    if db.load_font_file(path).is_err() {
+        return 0;
+    }
+    for name in ["Noto Sans CJK SC", "Noto Sans CJK", "Noto Sans Mono CJK SC"] {
         let query = fontdb::Query {
             families: &[fontdb::Family::Name(name)],
             weight: fontdb::Weight::NORMAL,
             stretch: fontdb::Stretch::Normal,
             style: fontdb::Style::Normal,
         };
-        let Some(id) = db.query(&query) else { continue };
-        let Some(face) = db.face(id) else { continue };
-        let fontdb::Source::File(path) = &face.source else { continue };
-        let Ok(bytes) = std::fs::read(path) else { continue };
-        let data = egui::FontData::from_blob(std::sync::Arc::new(bytes), face.index);
+        if let Some(id) = db.query(&query) {
+            if let Some(face) = db.face(id) {
+                return face.index;
+            }
+        }
+    }
+    0
+}
+
+fn install_ui_font(ctx: &egui::Context) {
+    let started = Instant::now();
+    // Fast path: loading every installed font through fontdb on every startup
+    // costs noticeable time. The common CJK fonts live at stable paths; only
+    // fall back to a full system scan if none of them exists.
+    let candidates = [
+        "/usr/share/fonts/google-noto-sans-cjk-vf-fonts/NotoSansCJK-VF.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+        "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+        "/System/Library/Fonts/PingFang.ttc",
+        "C:\\Windows\\Fonts\\msyh.ttc",
+    ];
+    let mut loaded: Option<(String, Vec<u8>, u32)> = None;
+    for path in candidates {
+        let p = std::path::Path::new(path);
+        if p.exists() {
+            if let Ok(bytes) = std::fs::read(p) {
+                loaded = Some((path.to_string(), bytes, cjk_face_index(p)));
+                break;
+            }
+        }
+    }
+    if loaded.is_none() {
+        let mut db = fontdb::Database::new();
+        db.load_system_fonts();
+        for name in [
+            "Noto Sans CJK SC",
+            "Noto Sans CJK",
+            "Droid Sans Fallback",
+            "WenQuanYi Micro Hei",
+            "Microsoft YaHei",
+            "PingFang SC",
+        ] {
+            let query = fontdb::Query {
+                families: &[fontdb::Family::Name(name)],
+                weight: fontdb::Weight::NORMAL,
+                stretch: fontdb::Stretch::Normal,
+                style: fontdb::Style::Normal,
+            };
+            let Some(id) = db.query(&query) else { continue };
+            let Some(face) = db.face(id) else { continue };
+            let fontdb::Source::File(path) = &face.source else { continue };
+            let Ok(bytes) = std::fs::read(path) else { continue };
+            loaded = Some((path.to_string_lossy().into_owned(), bytes, face.index));
+            break;
+        }
+    }
+    if let Some((name, bytes, index)) = loaded {
+        let data = egui::FontData::from_blob(std::sync::Arc::new(bytes), index);
         let families = vec![
             egui::epaint::text::InsertFontFamily {
                 family: egui::FontFamily::Proportional,
@@ -2109,7 +2694,11 @@ fn install_ui_font(ctx: &egui::Context) {
             },
         ];
         ctx.add_font(egui::epaint::text::FontInsert::new("pretty-cjk", data, families));
-        log::info!("UI CJK fallback font: {} ({})", name, path.display());
+        log::info!(
+            "UI CJK fallback font: {} ({} ms)",
+            name,
+            started.elapsed().as_millis()
+        );
         return;
     }
     log::warn!("no CJK system font found; Chinese UI text may show placeholder boxes");
@@ -2118,13 +2707,27 @@ fn install_ui_font(ctx: &egui::Context) {
 
 #[cfg(test)]
 mod tests {
-    use super::shell_quote_path;
+    use super::{shell_quote_path, Shortcut};
 
     #[test]
     fn file_drop_quotes_spaces_and_quotes() {
         assert_eq!(shell_quote_path("/tmp/a b.txt"), "'/tmp/a b.txt'");
         assert_eq!(shell_quote_path("/tmp/it's.txt"), "'/tmp/it'\\''s.txt'");
         assert_eq!(shell_quote_path("/tmp/plain"), "'/tmp/plain'");
+    }
+
+    #[test]
+    fn shortcut_parser_normalizes_modifiers_and_keys() {
+        let s = Shortcut::parse("Ctrl+Shift+T").unwrap();
+        assert!(s.ctrl && s.shift && !s.alt && s.key == "t");
+        let s = Shortcut::parse("ctrl+,").unwrap();
+        assert!(s.ctrl && !s.shift && s.key == ",");
+        let s = Shortcut::parse("Ctrl+Shift+=").unwrap();
+        assert_eq!(s.key, "=");
+        assert!(Shortcut::parse("").is_none());
+        let defaults = crate::config::default_shortcuts();
+        assert_eq!(defaults.get("find").map(String::as_str), Some("Ctrl+Shift+F"));
+        assert_eq!(defaults.get("new_tab").map(String::as_str), Some("Ctrl+Shift+T"));
     }
 
     #[test]

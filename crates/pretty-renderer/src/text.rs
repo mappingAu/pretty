@@ -448,8 +448,10 @@ impl Atlas {
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("pretty-atlas-sampler"),
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
+            // Glyphs are rasterized at their final physical size and sampled
+            // one-to-one; nearest keeps them sharp.
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
         });
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -865,8 +867,11 @@ impl TextRenderer {
         let cw = self.metrics.cell_w;
         let ch = self.metrics.cell_h;
         let padding = self.metrics.padding;
-        let x0 = origin.0 + padding;
-        let y0 = origin.1 + padding;
+        // Snap the text grid to physical pixels. The window scale factor and
+        // pane gaps can otherwise put every glyph on a fractional coordinate,
+        // which bilinear atlas sampling renders visibly soft.
+        let x0 = (origin.0 + padding).round();
+        let y0 = (origin.1 + padding).round();
         let (cursor_row, cursor_col, cursor_shape) = frame
             .cursor
             .filter(|c| c.visible)
@@ -942,8 +947,8 @@ impl TextRenderer {
                     let baseline = y0 + row as f32 * ch + self.metrics.baseline + glyph.y;
                     let mut gw = raster.width as f32;
                     let mut gh = raster.height as f32;
-                    let mut gx = cell_x + raster.left as f32;
-                    let mut gy = baseline - raster.top as f32;
+                    let mut gx = (cell_x + raster.left as f32).round();
+                    let mut gy = (baseline - raster.top as f32).round();
                     if raster.color {
                         let max_w = if cell.wide { cw * 2.0 } else { cw };
                         let max_h = ch;
@@ -953,8 +958,8 @@ impl TextRenderer {
                             let old_h = gh;
                             gw *= scale;
                             gh *= scale;
-                            gx = x0 + (col as f32) * cw + (max_w - gw) / 2.0;
-                            gy = y0 + (row as f32 + 1.0) * ch - gh;
+                            gx = (x0 + (col as f32) * cw + (max_w - gw) / 2.0).round();
+                            gy = (y0 + (row as f32 + 1.0) * ch - gh).round();
                             let _ = old_w;
                             let _ = old_h;
                         }

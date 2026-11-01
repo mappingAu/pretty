@@ -2,7 +2,7 @@ Name:           pretty-terminal
 Version:        0.1.0
 Release:        1%{?dist}
 Summary:        Hardware accelerated, kitty-compatible terminal emulator
-License:        MIT OR Apache-2.0
+License:        GPL-3.0-or-later
 URL:            https://example.invalid/pretty
 Source0:        pretty-stage.tar.gz
 Requires:       glibc >= 2.35
@@ -52,8 +52,8 @@ tar -xzf %{SOURCE0} -C %{buildroot} --strip-components=1
 %{_docdir}/pretty/ARCHITECTURE.md
 %{_docdir}/pretty/KNOWN-ISSUES.md
 %{_docdir}/pretty/PACKAGING.md
-%{_docdir}/pretty/LICENSE-MIT
-%{_docdir}/pretty/LICENSE-APACHE
+%{_docdir}/pretty/LICENSE
+%{_docdir}/pretty/copyright
 %{_docdir}/pretty/licenses
 %changelog
 * Sun Nov 01 2026 Pretty Authors <dev@pretty.local> - 0.1.0-1

@@ -2612,6 +2612,8 @@ dependencies = [
  "pretty-renderer",
  "serde",
  "toml",
+ "wayland-client",
+ "wayland-protocols",
  "wgpu",
  "winit",
  "x11rb",

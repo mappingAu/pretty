@@ -1,9 +1,12 @@
 # Pretty
 
+## **Warning**: Part of the code for this project was written by AI (Vibe coding).
+
 Pretty is a hardware-accelerated terminal emulator written in Rust. It targets
 the **kitty terminal protocol**, renders through **wgpu/Vulkan** or **OpenGL ES
 3.0+**, and is designed to feel familiar to Konsole users: graphical settings,
-split panes, scrollback, clipboard integration and desktop notifications.
+tabs, find, configurable shortcuts, split panes, scrollback, native IME,
+clipboard integration and desktop notifications.
 
 ![Pretty Vulkan feature demo](docs/screenshots/vulkan-features.png)
 
@@ -16,8 +19,11 @@ split panes, scrollback, clipboard integration and desktop notifications.
 | Metal / DirectX | **reserved only** — explicit `UnsupportedBackend` error, never silently selected |
 | kitty graphics | PNG/RGB/RGBA, chunked transfer, placement, delete, query, z-index; animation/file/SHM are not implemented |
 | kitty keyboard | all five progressive-enhancement flags, query/push/pop, tested CSI-u output |
-| Tiling, transparency, blur | working tiling panes; KWin/X11 per-pixel ARGB alpha + real blur-behind |
+| Tabs / find / shortcuts | tab bar, full-scrollback find, GUI-editable key bindings |
+| IME | native Wayland text-input-v3; X11 XIM fallback; per-app Fcitx state is preserved |
+| Tiling, transparency, blur | working tiling panes; native KWin Wayland `ext_background_effect_v1` + X11 per-pixel ARGB alpha with real blur |
 | Packages | deb, rpm and relocatable tar.gz with desktop entry, icon, man page and terminfo |
+| License | GPL-3.0-or-later; bundled fonts remain OFL-1.1 |
 
 See [docs/KITTY-COMPAT.md](docs/KITTY-COMPAT.md) for the item-by-item protocol
 matrix, [docs/TEST-REPORT.md](docs/TEST-REPORT.md) for real-hardware evidence and
@@ -68,6 +74,20 @@ matrix, [docs/TEST-REPORT.md](docs/TEST-REPORT.md) for real-hardware evidence an
   backend selection. Only a restart is required to change GPU backend.
 - Startup logs include requested/resolved backend, GPU, driver, surface format,
   alpha mode, font and negotiated protocol level.
+
+## UX notes
+
+- Tabs: `Ctrl+Shift+T`, `Ctrl+Tab` / `Ctrl+Shift+Tab`, or the tab bar.
+- Find: `Ctrl+Shift+F` or the tab-bar **Find** button; it searches the full
+  scrollback and selects the current match.
+- Shortcuts are editable under **Settings → Keyboard** and stored in the
+  `[shortcuts]` table of the config. Clearing a binding disables that action.
+- Native Wayland is preferred for Vulkan so Fcitx uses text-input-v3 (its normal
+  compact candidate popup) and KWin blurs through `ext_background_effect_v1`.
+  X11/XWayland remains the fallback; GLES still uses XWayland on this driver.
+- Cursor blinking is controlled by `cursor_blink`; it intentionally overrides a
+  terminal `DECSCUSR` steady style. The off phase draws a dim outline rather than
+  making the cursor vanish entirely.
 
 ## Build
 
@@ -234,6 +254,7 @@ ships `install.sh`. Installation verification is documented in
 
 ## License
 
-Pretty is licensed under MIT OR Apache-2.0. Bundled JetBrains Mono and Noto fonts
-are licensed under the SIL Open Font License 1.1; their license texts are shipped
-in `assets/licenses/` and in installed packages.
+Pretty is licensed under **GNU General Public License v3.0 or later**
+(`GPL-3.0-or-later`). See [LICENSE](LICENSE). Bundled JetBrains Mono and Noto
+fonts are licensed under the SIL Open Font License 1.1; their license texts are
+shipped in `assets/licenses/` and in installed packages.
