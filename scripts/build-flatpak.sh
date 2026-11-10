@@ -4,7 +4,7 @@
 set -euo pipefail
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$ROOT"
-VERSION=0.1.0
+VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 APP_ID=io.github.mappingAu.Pretty
 BUILD="$ROOT/build/flatpak/$APP_ID"
 REPO="$ROOT/build/flatpak-repo"

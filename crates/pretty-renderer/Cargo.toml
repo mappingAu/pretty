@@ -8,11 +8,14 @@ license.workspace = true
 description = "wgpu rendering abstraction, Vulkan/GLES drivers and text/graphics rendering for Pretty"
 
 [features]
+# Vulkan + GLES stay the default on Linux (the platform this release is tested
+# on). Windows release builds add `dx` and macOS release builds add `metal`;
+# `auto` then prefers Direct3D 12 on Windows and Metal on macOS respectively.
 default = ["vulkan", "gles"]
 vulkan = ["wgpu/vulkan"]
 gles = ["wgpu/gles"]
-metal = []
-dx = []
+metal = ["wgpu/metal"]
+dx = ["wgpu/dx12"]
 
 [dependencies]
 pretty-core.workspace = true

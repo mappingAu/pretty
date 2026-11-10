@@ -1,4 +1,16 @@
 //! Backend drivers and runtime selection.
+//!
+//! Vulkan, OpenGL ES 3.0+, Metal and Direct3D 12 are all implemented through
+//! `wgpu`. Whether a backend is *available* depends on two independent things:
+//!
+//! 1. the Cargo feature (`vulkan`, `gles`, `metal`, `dx`) compiled into this
+//!    binary, checked by [`RendererKind::compile_enabled`];
+//! 2. the host operating system, which determines the `auto` preference order
+//!    in [`RendererKind::candidates`] and rejects backends that cannot exist on
+//!    that platform (Metal is macOS-only, Direct3D 12 is Windows-only).
+//!
+//! Explicitly selecting a backend that is not available produces a typed error
+//! instead of silently falling back to another API.
 
 use std::fmt;
 use std::str::FromStr;
@@ -28,25 +40,49 @@ impl RendererKind {
         }
     }
 
-    pub fn is_reserved(self) -> bool {
-        matches!(self, Self::Metal | Self::Dx)
-    }
-
-    /// Build the ordered candidate list for `auto`.
+    /// Build the ordered candidate list.
+    ///
+    /// `auto` is platform-aware: Windows prefers Direct3D 12, macOS prefers
+    /// Metal, and every other target (Linux, FreeBSD, Android) prefers Vulkan
+    /// and then OpenGL ES. Candidates whose Cargo feature is not compiled into
+    /// this binary are skipped by [`crate::context::GpuContext`].
     pub fn candidates(self) -> Vec<Self> {
         match self {
-            Self::Auto => vec![Self::Vulkan, Self::Gles],
+            Self::Auto => {
+                if cfg!(target_os = "windows") {
+                    vec![Self::Dx, Self::Vulkan, Self::Gles]
+                } else if cfg!(target_os = "macos") {
+                    // wgpu's Vulkan backend can also run on macOS through
+                    // MoltenVK when the feature is compiled in. Keep it as a
+                    // fallback after the native Metal backend.
+                    vec![Self::Metal, Self::Vulkan]
+                } else {
+                    vec![Self::Vulkan, Self::Gles]
+                }
+            }
             other => vec![other],
         }
     }
 
-    pub fn compile_enabled(self) -> bool {
+    /// Whether this backend was compiled into the binary (Cargo feature).
+    pub const fn compile_enabled(self) -> bool {
         match self {
             Self::Auto => true,
             Self::Vulkan => cfg!(feature = "vulkan"),
             Self::Gles => cfg!(feature = "gles"),
             Self::Metal => cfg!(feature = "metal"),
             Self::Dx => cfg!(feature = "dx"),
+        }
+    }
+
+    /// Whether this backend can exist on the host operating system at all.
+    pub const fn platform_supported(self) -> bool {
+        match self {
+            Self::Auto => true,
+            Self::Vulkan => true,
+            Self::Gles => true,
+            Self::Metal => cfg!(target_os = "macos"),
+            Self::Dx => cfg!(target_os = "windows"),
         }
     }
 }
@@ -158,6 +194,7 @@ impl BackendDriver for GlesDriver {
     }
 }
 
+/// Metal backend driver (macOS). Enabled by the `metal` Cargo feature.
 #[cfg(any(target_os = "macos", feature = "metal"))]
 pub struct MetalDriver;
 #[cfg(any(target_os = "macos", feature = "metal"))]
@@ -170,6 +207,7 @@ impl BackendDriver for MetalDriver {
     }
 }
 
+/// Direct3D 12 backend driver (Windows). Enabled by the `dx` Cargo feature.
 #[cfg(any(target_os = "windows", feature = "dx"))]
 pub struct DxDriver;
 #[cfg(any(target_os = "windows", feature = "dx"))]
@@ -182,8 +220,9 @@ impl BackendDriver for DxDriver {
     }
 }
 
-/// Construct the driver for a real (implemented) backend. Reserved backends are
-/// rejected with an explicit error and never silently fall back.
+/// Construct the driver for a backend that is compiled in and supported by the
+/// host platform. Unavailable backends are rejected with an explicit error and
+/// never silently fall back.
 pub fn driver_for(kind: RendererKind) -> Result<Box<dyn BackendDriver>, String> {
     match kind {
         RendererKind::Vulkan => {
@@ -193,7 +232,7 @@ pub fn driver_for(kind: RendererKind) -> Result<Box<dyn BackendDriver>, String> 
             }
             #[cfg(not(feature = "vulkan"))]
             {
-                Err("Pretty was built without the Vulkan feature".into())
+                Err("Pretty was built without the Vulkan feature (enable the `vulkan` Cargo feature)".into())
             }
         }
         RendererKind::Gles => {
@@ -203,49 +242,201 @@ pub fn driver_for(kind: RendererKind) -> Result<Box<dyn BackendDriver>, String> 
             }
             #[cfg(not(feature = "gles"))]
             {
-                Err("Pretty was built without the GLES feature".into())
+                Err("Pretty was built without the GLES feature (enable the `gles` Cargo feature)".into())
             }
         }
-        RendererKind::Metal => Err(
-            "Metal backend is a reserved interface and is not implemented; \
-             select vulkan or gles"
-                .into(),
-        ),
-        RendererKind::Dx => Err(
-            "DirectX backend is a reserved interface and is not implemented; \
-             select vulkan or gles"
-                .into(),
-        ),
+        RendererKind::Metal => {
+            #[cfg(feature = "metal")]
+            {
+                if cfg!(target_os = "macos") {
+                    Ok(Box::new(MetalDriver))
+                } else {
+                    Err(format!(
+                        "the Metal backend is only available on macOS; this binary targets {} \
+                         (use --renderer vulkan or --renderer gles)",
+                        std::env::consts::OS
+                    ))
+                }
+            }
+            #[cfg(not(feature = "metal"))]
+            {
+                Err("Pretty was built without the Metal feature (Windows/Linux builds: \
+                     use --renderer vulkan or --renderer gles; macOS: rebuild with --features metal)"
+                    .into())
+            }
+        }
+        RendererKind::Dx => {
+            #[cfg(feature = "dx")]
+            {
+                if cfg!(target_os = "windows") {
+                    Ok(Box::new(DxDriver))
+                } else {
+                    Err(format!(
+                        "the Direct3D 12 backend is only available on Windows; this binary targets {} \
+                         (use --renderer vulkan or --renderer gles)",
+                        std::env::consts::OS
+                    ))
+                }
+            }
+            #[cfg(not(feature = "dx"))]
+            {
+                Err("Pretty was built without the Direct3D 12 feature (Linux/macOS builds: \
+                     use --renderer vulkan or --renderer gles; Windows: rebuild with --features dx)"
+                    .into())
+            }
+        }
         RendererKind::Auto => Err("internal error: Auto has no direct driver".into()),
     }
 }
-
-pub const RESERVED_BACKENDS: &[(&str, &str)] = &[
-    (
-        "metal",
-        "reserved interface skeleton; returns UnsupportedBackend, never selected",
-    ),
-    (
-        "dx",
-        "reserved interface skeleton; returns UnsupportedBackend, never selected",
-    ),
-];
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn reserved_backends_are_explicit_errors() {
-        assert!(matches!(driver_for(RendererKind::Metal), Err(ref e) if e.contains("reserved")));
-        assert!(matches!(driver_for(RendererKind::Dx), Err(ref e) if e.contains("reserved")));
+    fn expected_auto_order() -> Vec<RendererKind> {
+        if cfg!(target_os = "windows") {
+            vec![RendererKind::Dx, RendererKind::Vulkan, RendererKind::Gles]
+        } else if cfg!(target_os = "macos") {
+            vec![RendererKind::Metal, RendererKind::Vulkan]
+        } else {
+            vec![RendererKind::Vulkan, RendererKind::Gles]
+        }
     }
 
     #[test]
-    fn auto_prefers_vulkan_then_gles() {
-        assert_eq!(
-            RendererKind::Auto.candidates(),
-            vec![RendererKind::Vulkan, RendererKind::Gles]
-        );
+    fn auto_order_is_platform_aware() {
+        assert_eq!(RendererKind::Auto.candidates(), expected_auto_order());
+    }
+
+    #[test]
+    fn explicit_kinds_have_a_single_candidate() {
+        for kind in [
+            RendererKind::Vulkan,
+            RendererKind::Gles,
+            RendererKind::Metal,
+            RendererKind::Dx,
+        ] {
+            assert_eq!(kind.candidates(), vec![kind]);
+        }
+    }
+
+    #[test]
+    fn compile_enabled_matches_cargo_features() {
+        assert!(RendererKind::Auto.compile_enabled());
+        assert_eq!(RendererKind::Vulkan.compile_enabled(), cfg!(feature = "vulkan"));
+        assert_eq!(RendererKind::Gles.compile_enabled(), cfg!(feature = "gles"));
+        assert_eq!(RendererKind::Metal.compile_enabled(), cfg!(feature = "metal"));
+        assert_eq!(RendererKind::Dx.compile_enabled(), cfg!(feature = "dx"));
+    }
+
+    #[test]
+    fn platform_support_is_os_specific() {
+        assert!(RendererKind::Vulkan.platform_supported());
+        assert!(RendererKind::Gles.platform_supported());
+        assert_eq!(RendererKind::Metal.platform_supported(), cfg!(target_os = "macos"));
+        assert_eq!(RendererKind::Dx.platform_supported(), cfg!(target_os = "windows"));
+    }
+
+    #[test]
+    fn auto_has_no_direct_driver() {
+        assert!(driver_for(RendererKind::Auto).is_err());
+    }
+
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn vulkan_driver_uses_the_vulkan_wgpu_backend() {
+        let driver = driver_for(RendererKind::Vulkan).expect("vulkan feature is compiled in");
+        assert_eq!(driver.kind(), RendererKind::Vulkan);
+        assert_eq!(driver.wgpu_backends(), Backends::VULKAN);
+    }
+
+    #[cfg(feature = "gles")]
+    #[test]
+    fn gles_driver_uses_the_gl_wgpu_backend() {
+        let driver = driver_for(RendererKind::Gles).expect("gles feature is compiled in");
+        assert_eq!(driver.kind(), RendererKind::Gles);
+        assert_eq!(driver.wgpu_backends(), Backends::GL);
+    }
+
+    #[cfg(feature = "metal")]
+    #[test]
+    fn metal_driver_is_available_on_macos_only() {
+        match driver_for(RendererKind::Metal) {
+            Ok(driver) => {
+                assert!(cfg!(target_os = "macos"), "Metal driver must not be usable on non-macOS");
+                assert_eq!(driver.kind(), RendererKind::Metal);
+                assert_eq!(driver.wgpu_backends(), Backends::METAL);
+            }
+            Err(e) => {
+                assert!(!cfg!(target_os = "macos"));
+                assert!(e.contains("macOS"), "unexpected error: {e}");
+            }
+        }
+    }
+
+    #[cfg(feature = "dx")]
+    #[test]
+    fn dx_driver_is_available_on_windows_only() {
+        match driver_for(RendererKind::Dx) {
+            Ok(driver) => {
+                assert!(cfg!(target_os = "windows"), "Dx12 driver must not be usable on non-Windows");
+                assert_eq!(driver.kind(), RendererKind::Dx);
+                assert_eq!(driver.wgpu_backends(), Backends::DX12);
+            }
+            Err(e) => {
+                assert!(!cfg!(target_os = "windows"));
+                assert!(e.contains("Windows"), "unexpected error: {e}");
+            }
+        }
+    }
+
+    #[cfg(not(feature = "metal"))]
+    #[test]
+    fn metal_without_the_feature_is_an_explicit_error() {
+        match driver_for(RendererKind::Metal) {
+            Err(err) => assert!(
+                err.contains("without the Metal feature"),
+                "unexpected error: {err}"
+            ),
+            Ok(_) => panic!("metal driver must not be available without the feature"),
+        }
+    }
+
+    #[cfg(not(feature = "dx"))]
+    #[test]
+    fn dx_without_the_feature_is_an_explicit_error() {
+        match driver_for(RendererKind::Dx) {
+            Err(err) => assert!(
+                err.contains("without the Direct3D 12 feature"),
+                "unexpected error: {err}"
+            ),
+            Ok(_) => panic!("dx driver must not be available without the feature"),
+        }
+    }
+
+    #[test]
+    fn renderer_names_round_trip() {
+        for (name, kind) in [
+            ("auto", RendererKind::Auto),
+            ("vulkan", RendererKind::Vulkan),
+            ("gles", RendererKind::Gles),
+            ("metal", RendererKind::Metal),
+            ("dx", RendererKind::Dx),
+            ("dx12", RendererKind::Dx),
+            ("d3d12", RendererKind::Dx),
+            ("directx", RendererKind::Dx),
+            ("vk", RendererKind::Vulkan),
+        ] {
+            assert_eq!(name.parse::<RendererKind>(), Ok(kind), "parsing {name}");
+        }
+        for kind in [
+            RendererKind::Auto,
+            RendererKind::Vulkan,
+            RendererKind::Gles,
+            RendererKind::Metal,
+            RendererKind::Dx,
+        ] {
+            assert_eq!(kind.as_str().parse::<RendererKind>(), Ok(kind));
+        }
     }
 }

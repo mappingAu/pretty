@@ -1,0 +1,164 @@
+name: build
+
+# Native release builds for the three desktop platforms.
+#
+# This workflow is the only place where Windows and macOS binaries are built:
+# the development host used for this release is Linux with no MinGW or Apple
+# linker installed, so Linux `cargo check` cross-checks stay compile-only.
+# Artifacts are uploaded to the workflow run; they are not GitHub releases.
+#
+# Manual run:  Actions -> build -> Run workflow
+# Local mirror of the packaging steps: scripts/build-windows.sh,
+# scripts/build-macos.sh and the Linux tarball step below.
+
+on:
+  push:
+    branches: [master, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+            platform: linux
+            # Linux never ships Metal/DX; Vulkan + GLES are the default features.
+            features_args: ""
+          - name: windows-x86_64
+            os: windows-latest
+            platform: windows
+            # Portable zip with the Direct3D 12 backend compiled in; `auto`
+            # prefers DX12 on this binary.
+            features_args: "--features dx"
+          - name: macos
+            os: macos-latest
+            platform: macos
+            # .app bundle with the Metal backend compiled in; `auto` prefers
+            # Metal on this binary. The package script labels the artifact with
+            # the runner's uname -m (arm64 on GitHub public macOS runners).
+            features_args: "--features metal"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry, git and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.name }}
+          shared-key: pretty-native
+
+      - name: Install Linux build dependencies
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config \
+            libwayland-dev libxkbcommon-dev \
+            libx11-dev libxcb1-dev \
+            libegl1-mesa-dev libgles2-mesa-dev libvulkan-dev \
+            ncurses-bin
+
+      - name: Show toolchain
+        run: |
+          cargo --version
+          rustc --version
+
+      - name: Unit tests
+        # Pure unit tests only (protocol parsers, layout, config, backend
+        # selection); no GUI, GPU or display is opened here.
+        run: cargo test --workspace --locked
+
+      - name: Backend unit tests for the native backend feature
+        # On Windows this compiles/runs the Direct3D 12 driver tests and on
+        # macOS the Metal driver tests, i.e. the exact configuration used by
+        # the release binary below.
+        if: matrix.features_args != ''
+        run: cargo test -p pretty-renderer --locked ${{ matrix.features_args }}
+
+      - name: Build release binary
+        run: cargo build --release -p pretty-app --locked ${{ matrix.features_args }}
+
+      - name: Smoke test release binary
+        run: |
+          mkdir -p build
+          ext=""
+          if [ "${{ matrix.platform }}" = "windows" ]; then ext=".exe"; fi
+          bin="target/release/pretty${ext}"
+          ./"$bin" --version
+          # --print-info only enumerates adapters; CI runners may expose zero
+          # hardware adapters (or only software WARP/lavapipe), which is fine.
+          ./"$bin" --print-info > "build/print-info-${{ matrix.name }}.txt" 2>&1 \
+            || echo "note: --print-info exited non-zero (expected without a hardware GPU)"
+          cat "build/print-info-${{ matrix.name }}.txt"
+
+      - name: Install Linux terminfo tooling
+        if: matrix.platform == 'linux'
+        run: command -v tic || sudo apt-get install -y --no-install-recommends ncurses-bin
+
+      - name: Package Linux tarball
+        if: matrix.platform == 'linux'
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          name="pretty-${version}-linux-x86_64"
+          stage="build/ci/${name}"
+          rm -rf build/ci dist
+          mkdir -p "${stage}/docs" "${stage}/share/terminfo" dist
+          install -m 0755 target/release/pretty "${stage}/pretty"
+          cp README.md LICENSE "${stage}/"
+          cp docs/*.md "${stage}/docs/"
+          if command -v tic >/dev/null 2>&1; then
+            tic -x -o "${stage}/share/terminfo" packaging/pretty.terminfo
+          fi
+          tar -czf "dist/${name}.tar.gz" -C build/ci "${name}"
+          (cd dist && sha256sum ./*.tar.gz > SHA256SUMS-linux.txt)
+          ls -l dist
+
+      - name: Package Windows portable zip
+        if: matrix.platform == 'windows'
+        run: bash scripts/build-windows.sh --no-build
+
+      - name: Package macOS app bundle and tarballs
+        if: matrix.platform == 'macos'
+        run: bash scripts/build-macos.sh --no-build
+
+      - name: Upload native build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pretty-${{ matrix.name }}
+          if-no-files-found: error
+          path: |
+            dist/*
+            build/print-info-${{ matrix.name }}.txt
+
+      - name: Job summary
+        run: |
+          {
+            echo "### pretty-${{ matrix.name }}"
+            echo
+            echo '```'
+            ls -lh dist 2>/dev/null || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

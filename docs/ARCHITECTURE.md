@@ -1,21 +1,23 @@
 # Pretty — Architecture Design
 
 Status: **baseline design, implemented by this repository**. This document describes the
-architecture that the delivered source actually implements. Where a design element is a
-reserved platform extension (Metal, DirectX) it is called out explicitly.
+architecture that the delivered source actually implements. Where a platform backend was
+built and unit-tested by CI but not executed on physical hardware, it is called out
+explicitly.
 
 As-built versions: Rust 1.99.1, wgpu 30.0.1 (with a tiny vendored wgpu-hal GLES
 selection patch), winit 0.30.13, alacritty_terminal 0.26.0, egui 0.37.0. The
 renderer/terminal abstraction survived contact with real hardware: the Vulkan
-and GLES paths share all higher-level code, and Metal/DirectX are explicit
-unsupported stubs.
+and GLES paths share all higher-level code, and Metal (macOS) and Direct3D 12
+(Windows) use the same driver, adapter and surface code.
 
 ## 1. Goals and non-goals
 
 Pretty is a GPU-accelerated terminal emulator whose compatibility target is the kitty
-terminal protocol. The first-class rendering APIs are **Vulkan** and **OpenGL ES 3.0+**
-through `wgpu`. Metal and Direct3D are reserved interfaces: selecting them produces an
-explicit "not implemented" error and never silently falls back.
+terminal protocol. The rendering APIs are **Vulkan** and **OpenGL ES 3.0+** on Linux,
+**Metal** on macOS and **Direct3D 12** on Windows, all behind `wgpu`. Backends are
+compiled per platform with the `vulkan`/`gles`/`metal`/`dx` Cargo features; a backend
+that is unavailable fails with a typed error and never silently falls back.
 
 Non-goals for this release: a complete replacement for every kitty extension, a
 multiplexer/server architecture, and shipping a software rasterizer as a normal rendering
@@ -40,8 +42,7 @@ pretty/
 │   │   └── src/layout.rs         # tiling layout tree (backend-independent)
 │   ├── pretty-renderer/          # GPU abstraction layer and all wgpu code
 │   │   ├── src/lib.rs
-│   │   ├── src/backend.rs        # BackendDriver trait + Vulkan/GLES drivers,
-│   │   │                         # cfg-gated Metal/DX reserved skeletons
+│   │   ├── src/backend.rs        # BackendDriver trait + Vulkan/GLES/Metal/DX12 drivers
 │   │   ├── src/context.rs        # instance/adapter/device/surface/swapchain
 │   │   ├── src/gpu.rs            # solid/image pipelines, quad batching, textures
 │   │   ├── src/text.rs           # font selection, shaping, glyph atlases, glyph pipelines
@@ -231,7 +232,8 @@ the cell metrics; the renderer reconfigures the swapchain before using new dimen
 1. `--renderer <name>` command-line flag;
 2. `PRETTY_RENDERER` environment variable (`vulkan`, `gles`, `metal`, `dx`, `auto`);
 3. config file (`renderer = "..."`);
-4. `auto`: Vulkan, then GLES.
+4. `auto`, with a platform-aware order: Windows prefers Direct3D 12, macOS
+   prefers Metal and Linux/FreeBSD/Android prefer Vulkan then GLES.
 
 Each candidate is probed by creating a `wgpu` instance restricted to that backend,
 enumerating adapters and matching a surface-compatible adapter. A candidate that fails
@@ -258,9 +260,13 @@ Concrete drivers:
 
 * `VulkanDriver` — `wgpu::Backends::VULKAN`, real Vulkan required;
 * `GlesDriver` — `wgpu::Backends::GL`, requires an EGL/GLES adapter;
-* `MetalDriver` — feature `metal` (and macOS); returns
-  `RendererError::UnsupportedBackend("Metal backend is a reserved interface ...")`;
-* `DxDriver` — feature `dx` (and Windows); same explicit unsupported error.
+* `MetalDriver` — `wgpu::Backends::METAL`, feature `metal`, macOS only;
+* `DxDriver` — `wgpu::Backends::DX12`, feature `dx`, Windows only.
+
+A driver that was not compiled in, or that belongs to a different operating
+system, is rejected by `driver_for` with a typed error; `auto` skips its
+candidates with a "feature not compiled" note. `--print-info` reports the
+compiled features, the `auto` order and the enumerated adapters.
 
 The driver abstraction is deliberately narrow: wgpu already provides the resource
 abstraction. This keeps the codec (Vulkan/GLES) differences to instance creation and
@@ -363,14 +369,22 @@ Settings persist to the platform config directory as TOML.
   with logging.
 * Windows uses ConPTY through `portable-pty`; no `/dev`, `/proc` or POSIX path is used in
   cross-platform modules.
-* macOS uses the Unix PTY path and would use the Metal driver when implemented. The Metal
-  driver is explicitly a reserved interface and is not claimed as working.
+* macOS uses the Unix PTY path and the Metal backend (`--features metal`); `auto`
+  prefers Metal and falls back to Vulkan through MoltenVK when available. Native
+  macOS binaries are built and unit-tested by CI, not executed on physical Mac
+  hardware in this release.
+* Windows uses the Direct3D 12 backend (`--features dx`); `auto` prefers DX12 and
+  falls back to Vulkan/GLES when compiled and available. Native Windows binaries are
+  built and unit-tested by CI, not executed on physical Windows hardware in this
+  release.
 * Android has a compile-only target check today. The cross-check reports the
   real result; there is no `android-activity` event-loop entry, NDK/SDK build, storage
   integration or soft-keyboard bridge, so no APK is claimed. A production Android port
   needs all of those (documented in KNOWN-ISSUES).
-* Packages: deb/rpm/tar.gz contain the binary, desktop file, icon, man page, terminfo,
-  bundled OFL fonts and licenses. Build scripts generate all three from one staged tree.
+* Packages: Linux deb/rpm/tar.gz contain the binary, desktop file, icon, man page,
+  terminfo, bundled OFL fonts and licenses. A portable Windows zip and a macOS
+  `.app`/tar.gz are produced by native CI (`.github/workflows/build.yml`); on a native
+  host the same layout comes from `scripts/build-windows.sh` / `scripts/build-macos.sh`.
 
 ## 6. Observability and failure policy
 
@@ -380,14 +394,15 @@ Settings persist to the platform config directory as TOML.
   driver, device type, surface format, alpha mode, present mode, font family, kitty feature
   level, TERM and PTY size.
 * `--print-info` prints the same machine-readable report and exits; test scripts use it.
-* Unsupported features fail loudly: reserved backends, unavailable blur, missing font,
-  unsupported graphics command. They are not silently ignored.
+* Unsupported features fail loudly: a backend that is not compiled in or not
+  available on the host OS, unavailable blur, missing font, unsupported graphics
+  command. They are not silently ignored.
 * `docs/KNOWN-ISSUES.md` records every known limitation, including vttest items and
   compositor-specific behavior.
-* No `todo!()` / `unimplemented!()` on the default path. Reserved backend skeletons are
+* No `todo!()` / `unimplemented!()` on the default path. Metal/DX12 driver structs are
   compiled under `#[cfg(any(target_os = "macos", feature = "metal"))]` /
-  `#[cfg(any(target_os = "windows", feature = "dx"))]` and every attempt to select them
-  returns a typed `UnsupportedBackend` error before a GPU device is created.
+  `#[cfg(any(target_os = "windows", feature = "dx"))]`; selecting a backend that is not
+  available returns a typed error before a GPU device is created.
 
 ## 7. Testing strategy
 
@@ -415,7 +430,7 @@ Settings persist to the platform config directory as TOML.
    acceptance.
 
 Each milestone is validated by real commands whose output is kept in `docs/`.
-The delivered state (M1–M6 except runtime testing of reserved platforms) is
+The delivered state (M1–M6 except GUI runtime testing on Windows/macOS) is
 evidenced by `docs/TEST-REPORT.md`, `docs/KITTY-COMPAT.md`, the captured
 screenshots and `scripts/test-hardware.sh`. The GLES backend required a
 deliberate local wgpu-hal patch to obtain a true GLES context; that is part of

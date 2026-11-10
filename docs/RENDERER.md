@@ -1,16 +1,19 @@
 # Pretty renderer abstraction
 
-Pretty renders through `wgpu` and treats **Vulkan** and **OpenGL ES 3.0+** as
-real backends. Metal and Direct3D are reserved interface skeletons: their
-constructors return `UnsupportedBackend`, and the runtime refuses them before a
-device is created.
+Pretty renders through `wgpu` and exposes four real backends: **Vulkan** and
+**OpenGL ES 3.0+** on Linux, **Metal** on macOS and **Direct3D 12** on Windows.
+Metal and Direct3D 12 are compiled in with the `metal` / `dx` Cargo features;
+they are selected through the same driver interface, adapter policy and surface
+code as Vulkan/GLES. The `auto` order is platform-aware, and a backend that is
+not compiled in or cannot exist on the host OS fails with a typed error instead
+of silently falling back.
 
 ## 1. Source layout
 
 ```
 crates/pretty-renderer/src/
 ├── backend.rs   RendererKind, BackendDriver, VulkanDriver, GlesDriver,
-│                MetalDriver/DxDriver reserved cfg-gated skeletons
+│                MetalDriver/DxDriver (feature-gated real drivers)
 ├── context.rs   wgpu instance, display handle, adapter selection, device,
 │                surface caps, surface configuration/reconfiguration
 ├── gpu.rs       global uniform, solid-quad pipeline, image pipeline/textures
@@ -33,10 +36,18 @@ colour specs). It does not know about PTYs, settings, or pane trees.
 3. `config.renderer`;
 4. `auto`.
 
-`auto` probes Vulkan then GLES. `GpuContext::new` creates a wgpu instance with
-the union of compiled backends, supplies winit's owned display handle (required
-by the GL/EGL path), creates the surface with the window handle, enumerates
-adapters and chooses one that:
+The `auto` candidate order is platform-aware:
+
+| Target OS | `auto` order |
+|---|---|
+| Windows | Direct3D 12 → Vulkan → GLES |
+| macOS | Metal → Vulkan (MoltenVK) |
+| Linux / FreeBSD / Android | Vulkan → GLES |
+
+`GpuContext::new` creates a wgpu instance with the union of the compiled
+candidate backends, supplies winit's owned display handle (used by the GL/EGL
+path and ignored by Vulkan/Metal/DX12), creates the surface with the window
+handle, enumerates adapters and chooses one that:
 
 - matches the candidate backend;
 - is not `DeviceType::Cpu`;
@@ -62,7 +73,25 @@ pub trait BackendDriver {
 `VulkanDriver` requires a Vulkan adapter. `GlesDriver` requires the adapter
 driver string to identify **OpenGL ES** or ANGLE; a desktop OpenGL context is
 rejected. This is what prevents the backend from silently being "GL 3.3" rather
-than GLES.
+than GLES. `MetalDriver` selects `Backends::METAL` (macOS only) and `DxDriver`
+selects `Backends::DX12` (Windows only); both use the default `accept_adapter`
+policy, which rejects CPU/software adapters.
+
+Feature wiring is explicit:
+
+| Cargo feature | wgpu feature | Platform | `auto` position |
+|---|---|---|---|
+| `vulkan` | `wgpu/vulkan` | Linux/Windows/macOS (MoltenVK) | after the native API |
+| `gles` | `wgpu/gles` | Linux/Android/Windows | last |
+| `metal` | `wgpu/metal` | macOS | first on macOS |
+| `dx` | `wgpu/dx12` | Windows | first on Windows |
+
+Only the platform-native backend is placed before the generic ones, so each
+operating system uses its own API when the feature was compiled in. If a
+Cargo feature is missing, `auto` records "feature not compiled" for that
+candidate; explicitly selecting that backend returns
+`RendererError::UnsupportedBackend`. There is no silent substitution between
+APIs and no CPU fallback.
 
 ### 2.1 Local wgpu-hal patch
 
@@ -187,16 +216,19 @@ The settings overlay style is configurable independently: `ui_accent` and
 
 ## 7. Adding another backend
 
-1. Add a `RendererKind` variant and a `BackendDriver` implementation. For a
-   reserved platform, keep it `#[cfg(any(target_os = "...", feature = "..."))]`
-   and return a typed unsupported error from `driver_for`.
-2. Add a Cargo feature and gate the wgpu backend feature.
-3. Extend `RendererKind::candidates()` and the CLI/env parser.
+1. Add a `RendererKind` variant and a `BackendDriver` implementation with the
+   right `wgpu::Backends` bit. Gate the driver on its Cargo feature (and target
+   OS for a platform API) and return a typed error from `driver_for` when it is
+   not available.
+2. Add a Cargo feature that enables the matching `wgpu` feature.
+3. Extend `RendererKind::candidates()` with the platform-aware `auto` order and
+   extend the CLI/env parser.
 4. Add surface/alpha policy to the driver. Reuse `GpuContext`, the quad
    pipelines and the text/image renderers; do not duplicate device code.
 5. Add `--print-info` output, startup logging, and a hardware test entry.
-6. Document the support level in `KITTY-COMPAT.md`/`KNOWN-ISSUES.md`; never mark
-   a compile-only stub as working.
+6. Document the support level in `KITTY-COMPAT.md`/`KNOWN-ISSUES.md` and the
+   platform matrix in `README.md`; never mark a compile-only stub, or a backend
+   whose GUI was not run on that OS, as working.
 
 ## 8. Diagnostics
 

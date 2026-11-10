@@ -82,12 +82,6 @@ impl GpuContext {
         vsync: bool,
         allow_software: bool,
     ) -> Result<Self, RendererError> {
-        if requested.is_reserved() {
-            return Err(RendererError::UnsupportedBackend(format!(
-                "{} backend is a reserved interface and is not implemented",
-                requested
-            )));
-        }
         let candidates = requested.candidates();
         let mut enabled = Backends::empty();
         for candidate in &candidates {
@@ -99,19 +93,18 @@ impl GpuContext {
                 }
                 continue;
             }
-            match candidate {
-                RendererKind::Vulkan => enabled |= Backends::VULKAN,
-                RendererKind::Gles => enabled |= Backends::GL,
-                _ => {}
-            }
+            enabled |= wgpu_backends(*candidate);
         }
         if enabled.is_empty() {
             return Err(RendererError::NoAdapter(
-                "no rendering backend features are compiled in (enable vulkan or gles)".into(),
+                "no rendering backend features are compiled in (enable vulkan, gles, metal or dx)"
+                    .into(),
             ));
         }
-        // GL/EGL needs the platform display to be supplied up front; Vulkan
-        // ignores it. Supplying it also makes the GL surface compatible.
+        // GL/EGL needs the platform display to be supplied up front; winit's
+        // owned display handle is used there. Vulkan, Metal and Direct3D 12
+        // currently ignore it, so the same instance setup works on every
+        // supported platform.
         let mut descriptor = InstanceDescriptor::new_with_display_handle(Box::new(display_handle));
         descriptor.backends = enabled;
         let instance = Instance::new(descriptor);
@@ -144,12 +137,12 @@ impl GpuContext {
                 .iter()
                 .filter(|a| {
                     let info = a.get_info();
-                    info.backend == wgpu_backend(*candidate)
+                    info.backend == backend_of(*candidate)
                 })
                 .collect();
             matching.sort_by_key(|a| adapter_rank(&a.get_info()));
             let Some(adapter) = matching.into_iter().next() else {
-                attempts.push(format!("{candidate}: no {:?} adapter", wgpu_backend(*candidate)));
+                attempts.push(format!("{candidate}: no {:?} adapter", backend_of(*candidate)));
                 continue;
             };
             let info = adapter.get_info();
@@ -273,13 +266,24 @@ impl GpuContext {
     }
 }
 
-fn wgpu_backend(kind: RendererKind) -> Backend {
+fn backend_of(kind: RendererKind) -> Backend {
     match kind {
         RendererKind::Vulkan => Backend::Vulkan,
         RendererKind::Gles => Backend::Gl,
         RendererKind::Metal => Backend::Metal,
         RendererKind::Dx => Backend::Dx12,
         RendererKind::Auto => Backend::Vulkan,
+    }
+}
+
+/// The `wgpu::Backends` bit for one concrete renderer kind.
+fn wgpu_backends(kind: RendererKind) -> Backends {
+    match kind {
+        RendererKind::Vulkan => Backends::VULKAN,
+        RendererKind::Gles => Backends::GL,
+        RendererKind::Metal => Backends::METAL,
+        RendererKind::Dx => Backends::DX12,
+        RendererKind::Auto => Backends::empty(),
     }
 }
 
@@ -312,10 +316,8 @@ pub fn probe_adapters(kind: RendererKind) -> Vec<AdapterInfo> {
     let candidates = kind.candidates();
     let mut backends = Backends::empty();
     for c in &candidates {
-        match c {
-            RendererKind::Vulkan if c.compile_enabled() => backends |= Backends::VULKAN,
-            RendererKind::Gles if c.compile_enabled() => backends |= Backends::GL,
-            _ => {}
+        if c.compile_enabled() {
+            backends |= wgpu_backends(*c);
         }
     }
     if backends.is_empty() {
