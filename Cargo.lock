@@ -2596,7 +2596,7 @@ checksum = "e8cf8e6a8aa66ce33f63993ffc4ea4271eb5b0530a9002db8455ea6050c77bfa"
 
 [[package]]
 name = "pretty-app"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arboard",
  "crossbeam-channel",
@@ -2621,7 +2621,7 @@ dependencies = [
 
 [[package]]
 name = "pretty-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "alacritty_terminal",
  "base64",
@@ -2637,7 +2637,7 @@ dependencies = [
 
 [[package]]
 name = "pretty-renderer"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytemuck",
  "egui",

@@ -55,9 +55,13 @@ renderer or represent a compile-only stub as a supported platform.
    whole-window opacity property is then removed so KWin can blur the alpha
    background and keep text opaque. A compositor that ignores client alpha may
    fall back to an opaque appearance; KWin 6 / XWayland is verified.
-5. **Metal and Direct3D are not implemented.** The `metal`/`dx` features compile
-   the reserved driver skeleton; selecting them fails with a clear
-   `UnsupportedBackend` error.
+5. **Metal (macOS) and Direct3D 12 (Windows) are not GUI-tested on physical
+   hardware in this release.** Both backends are implemented through wgpu and
+   compiled into the native Windows/macOS release binaries
+   (`.github/workflows/build.yml`, unit-tested there). Local evidence is
+   `cargo check` for the cross targets only, because this Linux host has no
+   MinGW/Apple linker. Selecting a backend that was not compiled in, or that
+   belongs to another OS, fails with a clear typed error.
 6. **No fallback rasterizer by default.** If no supported hardware adapter
    exists, Pretty exits with a diagnostic rather than starting a software
    renderer. `--allow-software` is an explicit testing-only escape hatch used
@@ -95,24 +99,32 @@ renderer or represent a compile-only stub as a supported platform.
     implemented. OSC 9 and OSC 777 notifications are.
 15. **Notifications are Linux/Windows desktop notifications via notify-rust.**
     macOS uses the logged fallback because its notification backend needs an
-    Apple SDK; it is a reserved compile target. On a headless or D-Bus-less session delivery fails and is
-    logged.
-16. **OSC 52 paste is enabled by default.** `allow_osc52_paste = true` permits
-    processes to request clipboard reads as well as writes. Set it to `false` if
-    untrusted terminal output is a concern. Clipboard access depends on arboard
-    and the desktop session; store (copy) was verified end-to-end, while the
-    query/paste path is implemented but not separately scripted in the hardware
-    suite.
+    Apple SDK; it is a compile target only. On a headless or D-Bus-less session
+    delivery fails and is logged.
+16. **OSC 52 is copy-only by default.** `allow_osc52_copy = true` lets
+    applications write the clipboard; `allow_osc52_paste = false` denies
+    clipboard reads (an exfiltration channel for untrusted terminal output)
+    unless the user opts in through the settings panel or config file. The core
+    defaults to copy-only as well and the stream layer never overrides the
+    configured policy. Clipboard access depends on arboard and the desktop
+    session; store (copy) was verified end-to-end, while the query/paste path is
+    implemented but not separately scripted in the hardware suite.
 17. **Android is compile-only.** `cargo check --features android` passes with
     winit's native-activity feature, but there is no NDK/Gradle APK build, no
     `android_main` activity wrapper, no soft keyboard and no Android clipboard
     backend (the clipboard path is a logged no-op there). Do not ship the
     Android target as a working APK.
-18. **macOS/Windows are compile-checked only.** No runtime testing was possible
-    on this host. The Metal/DirectX drivers are reserved interfaces and are not
-    claimed to work.
-19. **Tiling is in-window split panes**, not arbitrary compositor tiling. Each
-    pane has its own PTY; there are no tabs or sessions yet.
+18. **macOS/Windows GUI runtime is not tested in this release.** The Linux
+    development host has no MinGW/Apple linker, so local Windows/macOS checks are
+    `cargo check` only. Native MSVC/Apple release binaries are built and their
+    unit tests are run by `.github/workflows/build.yml`; that CI does not launch
+    the GUI. Metal and Direct3D 12 are implemented backends, but this release
+    does not claim GUI verification on physical Windows/Mac hardware.
+19. **Tiling is in-window split panes plus tabs**, not arbitrary compositor
+    tiling or kitty sessions. Each pane has its own PTY; each tab has its own
+    pane layout. Kitty session files (`session`/`save_as_session`) are not
+    supported. The `scrollback` setting can be changed at runtime and applies to
+    all open panes (shrinking trims retained history immediately).
 20. **Selection is simple linear selection.** Semantic/block/line selection and
     double/triple-click word/line selection are not implemented.
 21. **Terminal emulation delegates core VT state to `alacritty_terminal`.** A few
