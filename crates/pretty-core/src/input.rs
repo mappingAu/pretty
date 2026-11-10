@@ -569,11 +569,32 @@ pub fn encode_focus(mode: TermMode, focused: bool) -> Option<Vec<u8>> {
 }
 
 /// Wrap pasted text according to bracketed-paste mode.
+///
+/// SECURITY: bracketed paste exists so an application can distinguish real
+/// keystrokes from pasted text. That guarantee is void if the pasted text can
+/// itself contain the `ESC [ 201 ~` end marker (or arbitrary escape sequences
+/// that only work because the application trusts the paste body). C0 control
+/// characters are therefore stripped from the paste body while keeping the
+/// layout characters tab/newline/CR. This mirrors the filtering done by kitty
+/// and alacritty; without it, text copied from a web page or a file can execute
+/// terminal control sequences when pasted.
 pub fn encode_paste(mode: TermMode, text: &str) -> Vec<u8> {
     if mode.contains(TermMode::BRACKETED_PASTE) {
         let mut out = Vec::with_capacity(text.len() + 12);
         out.extend_from_slice(b"\x1b[200~");
-        out.extend_from_slice(text.as_bytes());
+        for c in text.chars() {
+            if c.is_control() {
+                match c {
+                    '\t' => out.push(b'\t'),
+                    '\n' => out.push(b'\n'),
+                    '\r' => out.push(b'\r'),
+                    _ => {}
+                }
+            } else {
+                let mut buf = [0u8; 4];
+                out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+            }
+        }
         out.extend_from_slice(b"\x1b[201~");
         out
     } else {
@@ -673,5 +694,41 @@ mod tests {
             encode_paste(TermMode::BRACKETED_PASTE, "x"),
             b"\x1b[200~x\x1b[201~"
         );
+    }
+
+    #[test]
+    fn bracketed_paste_cannot_be_terminated_early() {
+        // A hostile clipboard entry that contains the bracketed-paste end
+        // marker (or any other escape sequence) must not escape the wrapper.
+        let out = encode_paste(
+            TermMode::BRACKETED_PASTE,
+            "safe\x1b[201~\x1b[2Jevil\x1b]52;c;cHduZWQ=\x07",
+        );
+        assert!(out.starts_with(b"\x1b[200~"));
+        assert!(out.ends_with(b"\x1b[201~"));
+        let body = &out[6..out.len() - 6];
+        assert!(!body.contains(&0x1b), "paste body must not contain ESC: {body:?}");
+        assert_eq!(count_subslice(&out, b"\x1b[201~"), 1);
+    }
+
+    #[test]
+    fn bracketed_paste_keeps_layout_controls() {
+        let out = encode_paste(TermMode::BRACKETED_PASTE, "a\tb\nc\r\n");
+        assert_eq!(out, b"\x1b[200~a\tb\nc\r\n\x1b[201~");
+    }
+
+    #[test]
+    fn unbracketed_paste_is_unchanged_for_compatibility() {
+        // Without bracketed paste the terminal has no framing contract to
+        // protect; preserve the historical byte-for-byte behaviour.
+        let text = "a\tb\nc";
+        assert_eq!(encode_paste(TermMode::default(), text), text.as_bytes());
+    }
+
+    fn count_subslice(haystack: &[u8], needle: &[u8]) -> usize {
+        haystack
+            .windows(needle.len())
+            .filter(|window| *window == needle)
+            .count()
     }
 }

@@ -42,6 +42,14 @@ impl Dimensions for TermSize {
     }
 }
 
+/// Hard upper bound for scrollback history lines.
+///
+/// A scrollback line costs roughly `columns * cell_size` bytes, so an
+/// unbounded value from a config file would be a memory hazard. Both the
+/// initial configuration and [`Terminal::set_scrollback`] clamp to this value;
+/// the settings UI uses the same 200 000-line maximum.
+pub const MAX_SCROLLBACK_LINES: usize = 200_000;
+
 #[derive(Clone, Debug)]
 pub struct CoreConfig {
     pub scrollback: usize,
@@ -57,7 +65,10 @@ impl Default for CoreConfig {
             scrollback: 10_000,
             kitty_keyboard: true,
             osc52_copy: true,
-            osc52_paste: true,
+            // Reading the clipboard on behalf of a process (OSC 52 "paste") is
+            // an exfiltration channel for untrusted terminal output; default it
+            // off. Alacritty's own default is copy-only for the same reason.
+            osc52_paste: false,
             cursor_style: CursorStyle {
                 shape: VteCursorShape::Block,
                 blinking: true,
@@ -68,6 +79,9 @@ impl Default for CoreConfig {
 
 pub struct Terminal {
     term: Term<EventSink>,
+    /// Options last applied to `term`; needed to update a single option without
+    /// losing the others (`Term::set_options` takes the whole config).
+    term_config: TermConfig,
     processor: Processor,
     filter: StreamFilter,
     graphics: GraphicsStore,
@@ -94,19 +108,20 @@ impl Terminal {
             (false, false) => Osc52::Disabled,
         };
         let term_config = TermConfig {
-            scrolling_history: config.scrollback,
+            scrolling_history: config.scrollback.min(MAX_SCROLLBACK_LINES),
             kitty_keyboard: config.kitty_keyboard,
             osc52,
             default_cursor_style: config.cursor_style,
             ..TermConfig::default()
         };
         let term = Term::new(
-            term_config,
+            term_config.clone(),
             &size,
             EventSink::new(tx.clone()),
         );
         let terminal = Self {
             term,
+            term_config,
             processor: Processor::new(),
             filter: StreamFilter::new(),
             graphics: GraphicsStore::new(),
@@ -132,6 +147,35 @@ impl Terminal {
         self.size.rows
     }
 
+    /// Currently configured scrollback history limit in lines.
+    pub fn scrollback(&self) -> usize {
+        self.term_config.scrolling_history
+    }
+
+    /// Change the maximum scrollback history at runtime.
+    ///
+    /// `lines` is clamped to [`MAX_SCROLLBACK_LINES`]. Shrinking trims already
+    /// retained history immediately (alacritty's `Term::set_options` invokes
+    /// `Grid::update_history`); growing takes effect for subsequent output.
+    /// All other terminal options (kitty keyboard, OSC 52 policy, cursor
+    /// style, escape chars) are preserved. Returns the effective limit.
+    pub fn set_scrollback(&mut self, lines: usize) -> usize {
+        let lines = lines.min(MAX_SCROLLBACK_LINES);
+        if lines == self.term_config.scrolling_history {
+            return lines;
+        }
+        debug!(
+            "terminal scrollback limit {} -> {} lines",
+            self.term_config.scrolling_history, lines
+        );
+        let mut config = self.term_config.clone();
+        config.scrolling_history = lines;
+        self.term.set_options(config.clone());
+        self.term_config = config;
+        self.generation += 1;
+        lines
+    }
+
     /// Feed raw PTY bytes into the stream filter and terminal parser.
     pub fn advance(&mut self, bytes: &[u8]) {
         for item in self.filter.feed(bytes) {
@@ -143,12 +187,13 @@ impl Terminal {
                 }
                 StreamItem::Graphics(payload) => {
                     let cursor = self.term.grid().cursor.point;
-                    let offset = self.term.grid().display_offset();
+                    // The cursor point is a grid line independent of the
+                    // current scroll position; the graphics store anchors to
+                    // that line and the renderer adds the display offset.
                     let ev = self.graphics.handle(
                         &payload,
                         cursor.line.0.max(0) as usize,
                         cursor.column.0,
-                        offset,
                     );
                     if let Some(response) = ev.response {
                         self.send(TerminalEvent::PtyWrite(response));
@@ -427,6 +472,10 @@ impl Terminal {
 mod tests {
     use super::*;
 
+    use base64::Engine as _;
+
+    use crate::events::ClipboardKind;
+
     #[test]
     fn default_cursor_is_block() {
         let cfg = CoreConfig::default();
@@ -464,5 +513,136 @@ mod tests {
         term.advance(b"\x1b[4 q");
         let frame = term.snapshot();
         assert_eq!(frame.cursor.expect("cursor").shape, CursorShape::Underline);
+    }
+
+    #[test]
+    fn graphics_anchor_ignores_scroll_position() {
+        let cfg = CoreConfig::default();
+        let (mut term, _rx) = Terminal::new(TermSize::new(10, 5), &cfg);
+        // Fill the screen with history and leave the cursor at the bottom row.
+        term.advance("a\r\nb\r\nc\r\nd\r\ne\r\nf\r\ng\r\n".as_bytes());
+        term.scroll(3);
+        assert_eq!(term.display_offset(), 3);
+        let raw = base64::engine::general_purpose::STANDARD.encode([10u8, 20, 30]);
+        term.advance(format!("\x1b_Ga=T,f=24,s=1,v=1,i=9;{raw}\x1b\\").as_bytes());
+        let frame = term.snapshot();
+        assert_eq!(frame.images.len(), 1);
+        // The image is anchored to the cursor's grid line (bottom row = 4) and
+        // must not have the 3-line scroll offset baked in.
+        assert_eq!(frame.images[0].anchor_line, 4);
+    }
+
+    #[test]
+    fn osc52_read_is_denied_by_default() {
+        let cfg = CoreConfig::default();
+        let (mut term, rx) = Terminal::new(TermSize::new(20, 5), &cfg);
+        term.advance(b"\x1b]52;c;?\x07");
+        let events: Vec<_> = rx.try_iter().collect();
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, TerminalEvent::ClipboardLoad(..))),
+            "OSC 52 clipboard read must be denied by default: {events:?}"
+        );
+    }
+
+    #[test]
+    fn osc52_read_allowed_only_when_configured() {
+        let cfg = CoreConfig { osc52_paste: true, ..Default::default() };
+        let (mut term, rx) = Terminal::new(TermSize::new(20, 5), &cfg);
+        term.advance(b"\x1b]52;c;?\x07");
+        let events: Vec<_> = rx.try_iter().collect();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, TerminalEvent::ClipboardLoad(..))),
+            "explicitly enabled OSC 52 paste must reach the app: {events:?}"
+        );
+    }
+
+    #[test]
+    fn set_scrollback_updates_history_limit_and_keeps_terminal_usable() {
+        let cfg = CoreConfig::default();
+        let (mut term, _rx) = Terminal::new(TermSize::new(10, 5), &cfg);
+        assert_eq!(term.scrollback(), 10_000);
+        assert_eq!(term.set_scrollback(100), 100);
+        assert_eq!(term.scrollback(), 100);
+        // Fill history up to the new cap.
+        for _ in 0..300 {
+            term.advance(b"x\r\n");
+        }
+        assert_eq!(term.history_size(), 100, "history must be capped at 100 lines");
+        // Shrinking trims retained history immediately.
+        assert_eq!(term.set_scrollback(10), 10);
+        assert_eq!(term.history_size(), 10, "shrink must trim existing history");
+        // Growing again takes effect for subsequent output.
+        term.set_scrollback(50);
+        for _ in 0..100 {
+            term.advance(b"y\r\n");
+        }
+        assert_eq!(term.history_size(), 50);
+        // The terminal still parses/render input after option changes.
+        term.advance(b"\x1b[2J\x1b[Hok");
+        let frame = term.snapshot();
+        assert_eq!(frame.cell(0, 0).map(|c| c.c), Some('o'));
+        assert_eq!(frame.cell(0, 1).map(|c| c.c), Some('k'));
+        assert!(frame.cursor.is_some());
+    }
+
+    #[test]
+    fn set_scrollback_clamps_to_core_maximum() {
+        let (mut term, _rx) = Terminal::new(TermSize::new(10, 5), &CoreConfig::default());
+        assert_eq!(term.set_scrollback(usize::MAX), MAX_SCROLLBACK_LINES);
+        assert_eq!(term.scrollback(), MAX_SCROLLBACK_LINES);
+        assert_eq!(term.set_scrollback(MAX_SCROLLBACK_LINES + 1), MAX_SCROLLBACK_LINES);
+    }
+
+    #[test]
+    fn initial_scrollback_is_clamped() {
+        let cfg = CoreConfig {
+            scrollback: usize::MAX,
+            ..CoreConfig::default()
+        };
+        let (mut term, _rx) = Terminal::new(TermSize::new(10, 5), &cfg);
+        assert_eq!(term.scrollback(), MAX_SCROLLBACK_LINES);
+        term.set_scrollback(4_096);
+        assert_eq!(term.scrollback(), 4_096);
+    }
+
+    #[test]
+    fn set_scrollback_preserves_other_terminal_options() {
+        let cfg = CoreConfig {
+            osc52_paste: true,
+            kitty_keyboard: true,
+            ..CoreConfig::default()
+        };
+        let (mut term, _rx) = Terminal::new(TermSize::new(10, 5), &cfg);
+        // Push a kitty keyboard mode so a reset would be observable.
+        term.advance(b"\x1b[>31u");
+        term.set_scrollback(1234);
+        assert!(term.mode().contains(TermMode::DISAMBIGUATE_ESC_CODES));
+        assert!(term.mode().contains(TermMode::REPORT_ALL_KEYS_AS_ESC));
+        // OSC 52 read policy survives the option update.
+        term.advance(b"\x1b]52;c;?\x07");
+        let events: Vec<_> = _rx.try_iter().collect();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, TerminalEvent::ClipboardLoad(..))),
+            "OSC 52 paste policy was lost on set_scrollback: {events:?}"
+        );
+    }
+
+    #[test]
+    fn osc52_write_is_allowed_by_default() {
+        let cfg = CoreConfig::default();
+        let (mut term, rx) = Terminal::new(TermSize::new(20, 5), &cfg);
+        term.advance(b"\x1b]52;c;aGk=\x07"); // base64("hi")
+        let events: Vec<_> = rx.try_iter().collect();
+        let stored = events.iter().find_map(|e| match e {
+            TerminalEvent::ClipboardStore(ClipboardKind::Clipboard, text) => Some(text.clone()),
+            _ => None,
+        });
+        assert_eq!(stored.as_deref(), Some("hi"));
     }
 }
