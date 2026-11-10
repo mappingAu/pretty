@@ -1,5 +1,7 @@
 //! Native terminal right-click menu (egui overlay).
 
+use std::collections::HashMap;
+
 use crate::i18n::{tr, Lang};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -17,6 +19,15 @@ pub enum ContextAction {
     Quit,
 }
 
+/// Shortcut label for a menu entry. Respects user edits in
+/// `[shortcuts]`: a cleared binding renders no shortcut text.
+fn shortcut_text(shortcuts: &HashMap<String, String>, action: &str, fallback: &str) -> String {
+    match shortcuts.get(action) {
+        Some(binding) => binding.clone(),
+        None => fallback.to_owned(),
+    }
+}
+
 /// Draw the context menu at `open` (logical points). Returns a chosen action and
 /// closes the menu on selection, Escape, or an outside click.
 pub fn show(
@@ -24,6 +35,7 @@ pub fn show(
     open: &mut Option<egui::Pos2>,
     lang: Lang,
     has_selection: bool,
+    shortcuts: &HashMap<String, String>,
 ) -> Option<ContextAction> {
     let mut pos = (*open)?;
     let screen = ctx.content_rect();
@@ -42,45 +54,51 @@ pub fn show(
                 .inner_margin(egui::Margin::same(5))
                 .show(ui, |ui| {
                     ui.set_min_width(200.0);
-                    let item = |ui: &mut egui::Ui, enabled: bool, text: &'static str, shortcut: &'static str| {
-                        let b = egui::Button::new(tr(lang, text))
+                    let item = |ui: &mut egui::Ui,
+                                    enabled: bool,
+                                    text: &'static str,
+                                    action_name: &str,
+                                    fallback: &'static str|
+                     -> bool {
+                        let shortcut = shortcut_text(shortcuts, action_name, fallback);
+                        let button = egui::Button::new(tr(lang, text))
                             .shortcut_text(shortcut)
                             .min_size(egui::vec2(190.0, 25.0));
-                        ui.add_enabled(enabled, b).clicked()
+                        ui.add_enabled(enabled, button).clicked()
                     };
-                    if item(ui, has_selection, "Copy", "Ctrl+Shift+C") {
+                    if item(ui, has_selection, "Copy", "copy", "Ctrl+Shift+C") {
                         action = Some(ContextAction::Copy);
                     }
-                    if item(ui, true, "Paste", "Ctrl+Shift+V") {
+                    if item(ui, true, "Paste", "paste", "Ctrl+Shift+V") {
                         action = Some(ContextAction::Paste);
                     }
-                    if item(ui, true, "Select all", "Ctrl+Shift+A") {
+                    if item(ui, true, "Select all", "select_all", "Ctrl+Shift+A") {
                         action = Some(ContextAction::SelectAll);
                     }
-                    if item(ui, true, "Clear screen", "") {
+                    if item(ui, true, "Clear screen", "clear", "") {
                         action = Some(ContextAction::Clear);
                     }
-                    if item(ui, true, "Find", "Ctrl+Shift+F") {
+                    if item(ui, true, "Find", "find", "Ctrl+Shift+F") {
                         action = Some(ContextAction::Find);
                     }
                     ui.separator();
-                    if item(ui, true, "New tab", "Ctrl+Shift+T") {
+                    if item(ui, true, "New tab", "new_tab", "Ctrl+Shift+T") {
                         action = Some(ContextAction::NewTab);
                     }
-                    if item(ui, true, "Split right", "Ctrl+Shift+E") {
+                    if item(ui, true, "Split right", "split_right", "Ctrl+Shift+E") {
                         action = Some(ContextAction::SplitRight);
                     }
-                    if item(ui, true, "Split down", "Ctrl+Shift+O") {
+                    if item(ui, true, "Split down", "split_down", "Ctrl+Shift+O") {
                         action = Some(ContextAction::SplitDown);
                     }
-                    if item(ui, true, "Close pane", "Ctrl+Shift+W") {
+                    if item(ui, true, "Close pane", "close_pane", "Ctrl+Shift+W") {
                         action = Some(ContextAction::ClosePane);
                     }
                     ui.separator();
-                    if item(ui, true, "Open settings", "Ctrl+,") {
+                    if item(ui, true, "Open settings", "settings", "Ctrl+,") {
                         action = Some(ContextAction::Settings);
                     }
-                    if item(ui, true, "Quit", "Ctrl+Shift+Q") {
+                    if item(ui, true, "Quit", "quit", "Ctrl+Shift+Q") {
                         action = Some(ContextAction::Quit);
                     }
                 });

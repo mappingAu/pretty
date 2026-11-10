@@ -10,7 +10,7 @@ mod settings;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use pretty_renderer::{probe_adapters, RendererKind, RESERVED_BACKENDS};
+use pretty_renderer::{probe_adapters, RendererKind};
 use winit::event_loop::EventLoop;
 
 use crate::app::{AppOptions, PrettyApp, UserEvent};
@@ -30,6 +30,7 @@ struct Cli {
     title: Option<String>,
     benchmark: Option<u32>,
     allow_software: bool,
+    import_kitty_conf: Option<PathBuf>,
     help: bool,
     version: bool,
 }
@@ -60,6 +61,9 @@ fn parse_args() -> Result<Cli, String> {
                 cli.opacity = Some(next("--opacity")?.parse().map_err(|_| "invalid --opacity")?)
             }
             "--title" => cli.title = Some(next("--title")?),
+            "--import-kitty-conf" => {
+                cli.import_kitty_conf = Some(PathBuf::from(next("--import-kitty-conf")?))
+            }
             "--benchmark" => {
                 cli.benchmark = Some(next("--benchmark")?.parse().map_err(|_| "invalid --benchmark")?)
             }
@@ -82,6 +86,7 @@ Usage: pretty [OPTIONS]\n\
 \n\
 Options:\n\
   --renderer <auto|vulkan|gles|metal|dx>  Select rendering backend\n\
+                                           (metal: macOS builds, dx: Windows builds)\n\
   --config <PATH>                          Configuration file\n\
   --command <COMMAND>                      Run a command instead of the login shell\n\
   --font-size <PX>                         Override font size\n\
@@ -154,18 +159,26 @@ fn print_info(config: &config::Config) {
     println!("kernel: {}", std::env::consts::FAMILY);
     println!("config.renderer: {}", config.renderer);
     println!(
-        "compiled_backends: vulkan={} gles={} metal={} dx={} (metal/dx reserved)",
+        "compiled_backends: vulkan={} gles={} metal={} dx={}",
         cfg!(feature = "vulkan"),
         cfg!(feature = "gles"),
         cfg!(feature = "metal"),
         cfg!(feature = "dx")
     );
-    for (name, reason) in RESERVED_BACKENDS {
-        println!("reserved_backend: {name}: {reason}");
+    let auto_order = RendererKind::Auto.candidates();
+    let auto_names: Vec<&str> = auto_order.iter().map(|kind| kind.as_str()).collect();
+    println!("auto_order: {}", auto_names.join(","));
+    for kind in &auto_order {
+        println!(
+            "backend {}: compiled={} platform_supported={}",
+            kind,
+            kind.compile_enabled(),
+            kind.platform_supported()
+        );
     }
-    for kind in [RendererKind::Vulkan, RendererKind::Gles] {
+    for kind in &auto_order {
         println!("-- backend {} --", kind);
-        let adapters = probe_adapters(kind);
+        let adapters = probe_adapters(*kind);
         if adapters.is_empty() {
             println!("  no adapters detected");
         }
@@ -207,6 +220,24 @@ fn main() -> ExitCode {
     }
 
     let path = config::config_path(cli.config.as_deref());
+    if let Some(source) = &cli.import_kitty_conf {
+        match config::import_kitty_conf_to_file(source, &path) {
+            Ok(report) => {
+                println!("{}", report.summary());
+                for warning in &report.warnings {
+                    eprintln!("warning: {warning}");
+                }
+                for key in &report.unsupported {
+                    eprintln!("skipped: {key}");
+                }
+                return ExitCode::SUCCESS;
+            }
+            Err(e) => {
+                eprintln!("pretty: failed to import {}: {e}", source.display());
+                return ExitCode::FAILURE;
+            }
+        }
+    }
     let mut config = config::load(&path);
     if let Some(size) = cli.font_size {
         config.font_size = size;

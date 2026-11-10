@@ -104,6 +104,24 @@ impl Shortcut {
             WinitKey::Named(WinitNamedKey::PageDown) => "pagedown".into(),
             WinitKey::Named(WinitNamedKey::Escape) => "escape".into(),
             WinitKey::Named(WinitNamedKey::Enter) => "enter".into(),
+            WinitKey::Named(WinitNamedKey::Space) => "space".into(),
+            WinitKey::Named(WinitNamedKey::Home) => "home".into(),
+            WinitKey::Named(WinitNamedKey::End) => "end".into(),
+            WinitKey::Named(WinitNamedKey::Insert) => "insert".into(),
+            WinitKey::Named(WinitNamedKey::Delete) => "delete".into(),
+            WinitKey::Named(WinitNamedKey::Backspace) => "backspace".into(),
+            WinitKey::Named(WinitNamedKey::F1) => "f1".into(),
+            WinitKey::Named(WinitNamedKey::F2) => "f2".into(),
+            WinitKey::Named(WinitNamedKey::F3) => "f3".into(),
+            WinitKey::Named(WinitNamedKey::F4) => "f4".into(),
+            WinitKey::Named(WinitNamedKey::F5) => "f5".into(),
+            WinitKey::Named(WinitNamedKey::F6) => "f6".into(),
+            WinitKey::Named(WinitNamedKey::F7) => "f7".into(),
+            WinitKey::Named(WinitNamedKey::F8) => "f8".into(),
+            WinitKey::Named(WinitNamedKey::F9) => "f9".into(),
+            WinitKey::Named(WinitNamedKey::F10) => "f10".into(),
+            WinitKey::Named(WinitNamedKey::F11) => "f11".into(),
+            WinitKey::Named(WinitNamedKey::F12) => "f12".into(),
             _ => return None,
         };
         Some(Self {
@@ -212,6 +230,10 @@ pub struct PrettyApp {
     settings: SettingsState,
     settings_was_open: bool,
     settings_anim_until: Option<Instant>,
+    /// Modal confirmation shown before quitting when `confirm_close` is set.
+    confirm_close_dialog: bool,
+    /// Deadline for the visual-bell border flash.
+    bell_flash_until: Option<Instant>,
     panes: HashMap<PaneId, Pane>,
     layout: Layout,
     focused: PaneId,
@@ -268,21 +290,22 @@ impl PrettyApp {
             intervals: Vec::new(),
         });
         let lang = Lang::from_setting(&config.language);
+        let egui_ctx = egui::Context::default();
+        install_ui_font(&egui_ctx);
+        egui_ctx.set_zoom_factor(config.ui_scale.clamp(0.5, 2.5));
         Self {
             config,
             options,
             proxy,
             window: None,
             renderer: None,
-            egui_ctx: {
-                let ctx = egui::Context::default();
-                install_ui_font(&ctx);
-                ctx
-            },
+            egui_ctx,
             egui_state: None,
             settings,
             settings_was_open: false,
             settings_anim_until: None,
+            confirm_close_dialog: false,
+            bell_flash_until: None,
             panes: HashMap::new(),
             layout: Layout::leaf(PaneId(0)),
             focused: PaneId(0),
@@ -321,6 +344,88 @@ impl PrettyApp {
         }
     }
 
+    /// Effective pixels-per-point for the UI layer: HiDPI scale factor times
+    /// the user-configured UI scale. Terminal cell metrics are intentionally not
+    /// affected, so the UI can be enlarged without reflowing the terminal.
+    fn ui_ppp(&self) -> f32 {
+        (self.scale_factor as f32 * self.config.ui_scale.clamp(0.5, 2.5)).max(0.25)
+    }
+
+    fn apply_ui_scale(&self) {
+        self.egui_ctx.set_zoom_factor(self.config.ui_scale.clamp(0.5, 2.5));
+    }
+
+    fn blink_interval(&self) -> Duration {
+        Duration::from_millis(self.config.cursor_blink_interval_ms.clamp(50, 5_000) as u64)
+    }
+
+    fn reset_blink(&mut self) {
+        self.blink_on = true;
+        self.last_blink = Instant::now() + self.blink_interval();
+    }
+
+    /// Persist a pending debounced UI edit immediately. `std::process::exit`
+    /// skips `ApplicationHandler::exiting`, so quit paths must call this first;
+    /// otherwise a setting changed <220ms before quitting was silently lost.
+    fn flush_config_save(&mut self) {
+        if !self.pending_ui_apply {
+            return;
+        }
+        self.pending_ui_apply = false;
+        if let Err(e) = crate::config::save(&self.options.config_path, &self.config) {
+            log::warn!("failed to save config: {e}");
+        }
+    }
+
+    fn request_exit(&mut self) {
+        if self.config.confirm_close {
+            self.confirm_close_dialog = true;
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+            return;
+        }
+        self.flush_config_save();
+        self.exit_requested = true;
+    }
+
+    /// Shortcut text for menus/tooltips; empty when the action is unbound.
+    fn shortcut_hint(&self, action: &str) -> String {
+        self.config
+            .shortcut(action)
+            .filter(|binding| !binding.trim().is_empty())
+            .unwrap_or("")
+            .to_owned()
+    }
+
+    /// Import a kitty.conf into the live config, keep the settings draft in
+    /// sync and report the result in the settings panel.
+    fn perform_kitty_import(&mut self, path: &std::path::Path) {
+        match crate::config::import_kitty_conf(path, &mut self.config) {
+            Ok(report) => {
+                self.config.validate();
+                self.settings.draft = self.config.clone();
+                let mut message = format!("Imported {}: {}", path.display(), report.summary());
+                if !report.unsupported.is_empty() {
+                    message.push_str(&format!(" Unsupported: {}.", report.unsupported.join(", ")));
+                }
+                if !report.warnings.is_empty() {
+                    message.push_str(&format!(" Warnings: {}", report.warnings.join("; ")));
+                }
+                log::info!("kitty.conf import: {message}");
+                self.settings.import_status = Some((true, message));
+                self.config_changed();
+            }
+            Err(error) => {
+                log::warn!("kitty.conf import failed: {error}");
+                self.settings.import_status = Some((false, format!("Import failed: {error}")));
+            }
+        }
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
     fn create_window(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
@@ -351,7 +456,7 @@ impl PrettyApp {
             }
         };
         self.scale_factor = window.scale_factor();
-        self.egui_ctx.set_pixels_per_point(self.scale_factor as f32);
+        self.apply_ui_scale();
         let theme = self.config.theme();
         // On X11 the compositor blur effect only blurs a client buffer that
         // actually has alpha. Using _NET_WM_WINDOW_OPACITY alone makes the
@@ -457,7 +562,7 @@ impl PrettyApp {
 
     fn layout_area(&self) -> Rect {
         let size = self.window.as_ref().map(|w| w.inner_size()).unwrap_or(PhysicalSize::new(1280, 800));
-        let margin = (6.0 * self.scale_factor as f32).round();
+        let margin = self.ui_margin();
         let tab_h = self.tab_bar_height();
         let top = margin + tab_h;
         Rect::new(
@@ -468,8 +573,17 @@ impl PrettyApp {
         )
     }
 
+    /// Margin around the terminal panes in physical pixels (matches the egui
+    /// space left around the tab bar, including UI scale).
+    fn ui_margin(&self) -> f32 {
+        (6.0 * self.ui_ppp()).round()
+    }
+
     fn tab_bar_height(&self) -> f32 {
-        (30.0 * self.scale_factor as f32).round()
+        if !self.config.tab_bar_visible {
+            return 0.0;
+        }
+        (self.config.tab_bar_height.clamp(18.0, 64.0) * self.ui_ppp()).round()
     }
 
     fn pane_grid_size(&self, rect: Rect) -> (usize, usize) {
@@ -536,10 +650,10 @@ impl PrettyApp {
         let core_config = pretty_core::CoreConfig {
             scrollback: self.config.scrollback,
             kitty_keyboard: true,
-            osc52_copy: true,
+            osc52_copy: self.config.allow_osc52_copy,
             osc52_paste: self.config.allow_osc52_paste,
             cursor_style: CursorStyle {
-                shape: pretty_core::CoreCursorShape::Block,
+                shape: cursor_shape_from_config(&self.config.cursor_shape),
                 blinking: self.config.cursor_blink,
             },
         };
@@ -617,8 +731,7 @@ impl PrettyApp {
         if pane.term.display_offset() > 0 {
             pane.term.scroll_to_bottom();
         }
-        self.blink_on = true;
-        self.last_blink = Instant::now() + Duration::from_millis(530);
+        self.reset_blink();
     }
 
     #[cfg(not(target_os = "android"))]
@@ -711,6 +824,10 @@ impl PrettyApp {
             }
             return;
         }
+        // Match on characters, never byte offsets: the previous code mixed
+        // `lower[from..].find()` byte positions with per-char column indices,
+        // so CJK/emoji matches highlighted the wrong range or ran past the row.
+        let query_chars: Vec<char> = query.chars().collect();
         let Some(pane) = self.focused_pane_mut() else { return };
         let mut found: Vec<(usize, usize, usize)> = Vec::new();
         let saved_offset = pane.term.display_offset();
@@ -722,7 +839,7 @@ impl PrettyApp {
             let frame = pane.term.snapshot();
             let base = history.saturating_sub(frame.display_offset);
             for row in 0..frame.rows {
-                let mut line = String::new();
+                let mut chars: Vec<char> = Vec::new();
                 let mut char_cols = Vec::new();
                 for col in 0..cols {
                     let Some(cell) = frame.cell(row, col) else { break };
@@ -730,20 +847,32 @@ impl PrettyApp {
                         continue;
                     }
                     for ch in std::iter::once(cell.c).chain(cell.zero_width.iter().copied()) {
-                        line.push(ch);
+                        chars.push(ch);
                         char_cols.push(col);
                     }
                 }
-                let lower = line.to_lowercase();
-                let mut from = 0;
-                while let Some(pos) = lower[from..].find(&query) {
-                    let start_char = from + pos;
-                    let end_char = start_char + query.len();
-                    let Some(&col) = char_cols.get(start_char) else { break };
-                    let len = end_char.saturating_sub(start_char).max(1);
-                    found.push((base + row, col, len));
-                    from = end_char;
-                    if from >= lower.len() { break; }
+                // Fold per character and remember which original character each
+                // folded scalar came from (case mapping may expand a char).
+                let mut lower: Vec<char> = Vec::new();
+                let mut lower_to_char: Vec<usize> = Vec::new();
+                for (index, ch) in chars.iter().enumerate() {
+                    for folded in ch.to_lowercase() {
+                        lower.push(folded);
+                        lower_to_char.push(index);
+                    }
+                }
+                let mut start = 0;
+                while start + query_chars.len() <= lower.len() {
+                    if lower[start..start + query_chars.len()] == query_chars[..] {
+                        let first = lower_to_char[start];
+                        let last = lower_to_char[start + query_chars.len() - 1];
+                        if let Some(&col) = char_cols.get(first) {
+                            found.push((base + row, col, (last + 1 - first).max(1)));
+                        }
+                        start += query_chars.len().max(1);
+                    } else {
+                        start += 1;
+                    }
                 }
             }
             if frame.display_offset == 0 {
@@ -826,16 +955,11 @@ impl PrettyApp {
             }
             "next_tab" => self.next_tab(1),
             "prev_tab" => self.next_tab(-1),
-            "quit" => {
-                if let Some(w) = &self.window {
-                    w.set_visible(false);
-                }
-                std::process::exit(0);
-            }
+            "quit" => self.request_exit(),
             "zoom_in" => self.adjust_font_size(1.0),
             "zoom_out" => self.adjust_font_size(-1.0),
             "zoom_reset" => {
-                self.config.font_size = 15.0;
+                self.config.font_size = crate::config::Config::default().font_size;
                 self.config_changed();
             }
             _ => return false,
@@ -860,6 +984,12 @@ impl PrettyApp {
                 w.request_redraw();
             }
             return true;
+        }
+        // While an overlay text field owns the keyboard, only modified
+        // shortcuts are global so a single-key binding cannot eat typed text.
+        let overlay_open = self.settings.open || self.search.open || self.context_menu.is_some();
+        if overlay_open && !ctrl && !alt && !self.modifiers.super_key() {
+            return false;
         }
         if let Some(action) = self.configured_shortcut(event) {
             if self.run_shortcut(action) {
@@ -925,13 +1055,14 @@ impl PrettyApp {
     }
 
     fn adjust_font_size(&mut self, delta: f32) {
-        self.config.font_size = (self.config.font_size + delta).clamp(8.0, 32.0);
+        self.config.font_size = (self.config.font_size + delta).clamp(7.0, 42.0);
         self.config_changed();
     }
 
     fn config_changed(&mut self) {
         self.config.validate();
         self.lang = Lang::from_setting(&self.config.language);
+        self.apply_ui_scale();
         // Theme/compositor changes are cheap and should be visible while a
         // slider moves. Expensive PTY resizing and disk writes are debounced:
         // saving on every egui frame made dragging a toggle visibly stutter.
@@ -1016,8 +1147,7 @@ impl PrettyApp {
         self.load_active_tab();
         self.resize_all();
         self.update_title();
-        self.blink_on = true;
-        self.last_blink = Instant::now() + Duration::from_millis(530);
+        self.reset_blink();
         if let Some(w) = &self.window {
             w.request_redraw();
         }
@@ -1037,10 +1167,14 @@ impl PrettyApp {
             return;
         }
         if self.tabs.len() == 1 {
-            if let Some(w) = &self.window {
-                w.set_visible(false);
-            }
-            std::process::exit(0);
+            self.request_exit();
+            return;
+        }
+        if index != self.active_tab {
+            // Closing a *background* tab used to reload the active tab from its
+            // last saved snapshot, silently reverting a pane focus change made
+            // since the last tab switch. Persist the live state first.
+            self.save_active_tab();
         }
         let tab = self.tabs.remove(index);
         for id in tab.layout.leaves() {
@@ -1091,6 +1225,31 @@ impl PrettyApp {
     }
 
     fn close_pane(&mut self, id: PaneId) {
+        // Exit/ChildExit can arrive for a pane belonging to a *background* tab.
+        // The old code only edited the active layout, which either leaked the
+        // dead pane or closed the wrong (active) tab. Resolve the owner first.
+        let Some(tab_index) = self.tabs.iter().position(|tab| tab.layout.contains(id)) else {
+            // Already gone (e.g. duplicate exit event): clean up defensively.
+            self.panes.remove(&id);
+            return;
+        };
+        if tab_index != self.active_tab {
+            if self.tabs[tab_index].layout.leaves().len() <= 1 {
+                self.panes.remove(&id);
+                self.close_tab(tab_index);
+                return;
+            }
+            if let Some(tab) = self.tabs.get_mut(tab_index) {
+                if tab.layout.remove(id) && !tab.layout.contains(tab.focused) {
+                    tab.focused = tab.layout.leaves().first().copied().unwrap_or(PaneId(0));
+                }
+            }
+            self.panes.remove(&id);
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+            return;
+        }
         if self.layout.leaves().len() <= 1 {
             self.close_tab(self.active_tab);
             return;
@@ -1153,18 +1312,25 @@ impl PrettyApp {
     }
 
     fn pane_at(&self, x: f64, y: f64) -> Option<(PaneId, usize, usize)> {
+        let m = self.renderer.as_ref()?.cell_metrics();
         for (id, pane) in &self.panes {
-            if pane.rect.contains(x as f32, y as f32) {
-                let m = self.renderer.as_ref()?.cell_metrics();
-                let px = x as f32 - pane.rect.x - m.padding;
-                let py = y as f32 - pane.rect.y - m.padding;
-                if px < 0.0 || py < 0.0 {
-                    return Some((*id, 0, 0));
-                }
-                let col = (px / m.cell_w).floor() as usize;
-                let row = (py / m.cell_h).floor() as usize;
-                return Some((*id, col.min(pane.cols.saturating_sub(1)), row.min(pane.rows.saturating_sub(1))));
+            // Only panes of the active tab are visible and interactive. Panes
+            // of inactive tabs keep stale rectangles; the old loop let a click
+            // in a hidden area focus an invisible shell and route keys to it.
+            if !self.layout.contains(*id) || !pane.rect.contains(x as f32, y as f32) {
+                continue;
             }
+            // Clicks in the padding clamp to the nearest cell instead of
+            // always reporting cell (0, 0).
+            let px = (x as f32 - pane.rect.x - m.padding).max(0.0);
+            let py = (y as f32 - pane.rect.y - m.padding).max(0.0);
+            let col = (px / m.cell_w.max(1.0)).floor() as usize;
+            let row = (py / m.cell_h.max(1.0)).floor() as usize;
+            return Some((
+                *id,
+                col.min(pane.cols.saturating_sub(1)),
+                row.min(pane.rows.saturating_sub(1)),
+            ));
         }
         None
     }
@@ -1187,8 +1353,7 @@ impl PrettyApp {
                 pane.term.advance(&chunk);
             }
         }
-        self.blink_on = true;
-        self.last_blink = Instant::now() + Duration::from_millis(530);
+        self.reset_blink();
         self.handle_terminal_events(id);
         if let Some(w) = &self.window {
             w.request_redraw();
@@ -1226,8 +1391,24 @@ impl PrettyApp {
                 }
                 TerminalEvent::Bell => {
                     log::info!("terminal bell (pane {})", id.0);
-                    if let Some(w) = &self.window {
-                        w.request_user_attention(Some(winit::window::UserAttentionType::Informational));
+                    match self.config.bell.as_str() {
+                        "none" => {}
+                        "visual" => {
+                            let duration = Duration::from_millis(
+                                self.config.visual_bell_duration_ms.clamp(20, 2_000) as u64,
+                            );
+                            self.bell_flash_until = Some(Instant::now() + duration);
+                            if let Some(w) = &self.window {
+                                w.request_redraw();
+                            }
+                        }
+                        _ => {
+                            if let Some(w) = &self.window {
+                                w.request_user_attention(Some(
+                                    winit::window::UserAttentionType::Informational,
+                                ));
+                            }
+                        }
                     }
                 }
                 TerminalEvent::ClipboardStore(_kind, text) => {
@@ -1280,8 +1461,7 @@ impl PrettyApp {
                     }
                 }
                 TerminalEvent::CursorBlinkingChange => {
-                    self.blink_on = true;
-                    self.last_blink = Instant::now() + Duration::from_millis(530);
+                    self.reset_blink();
                 }
                 TerminalEvent::Wakeup => {}
                 TerminalEvent::Exit => self.close_pane(id),
@@ -1341,10 +1521,13 @@ impl PrettyApp {
     }
 
     fn process_key(&mut self, event: &winit::event::KeyEvent) {
+        if self.confirm_close_dialog {
+            return;
+        }
         if self.handle_shortcut(event) {
             return;
         }
-        if self.settings.open || self.search.open {
+        if self.settings.open || self.search.open || self.context_menu.is_some() {
             return;
         }
         if event.state == ElementState::Released {
@@ -1401,10 +1584,10 @@ impl PrettyApp {
             && button == pretty_core::MouseButton::Right
             && (shift || !mode.intersects(TermMode::MOUSE_MODE))
         {
-            let scale = self.scale_factor.max(1.0) as f32;
+            let ppp = self.ui_ppp().max(0.25) as f64;
             self.context_menu = Some(egui::pos2(
-                (pos.x / scale as f64) as f32,
-                (pos.y / scale as f64) as f32,
+                (pos.x / ppp) as f32,
+                (pos.y / ppp) as f32,
             ));
             log::info!("context menu requested at {:?}", self.context_menu);
             self.mouse.button = None;
@@ -1422,6 +1605,13 @@ impl PrettyApp {
                 .get(&pane_id)
                 .and_then(|pane| pane.term.hyperlink_at(row, col));
             if let Some(uri) = uri {
+                // OSC 8 targets are untrusted terminal output: any process can
+                // emit one. Never hand file://, custom handler schemes or
+                // credential-bearing URLs to the desktop opener.
+                if !is_safe_hyperlink(&uri) {
+                    log::warn!("refusing to open OSC 8 hyperlink with unsupported scheme: {uri}");
+                    return;
+                }
                 log::info!("opening OSC 8 hyperlink: {uri}");
                 if let Err(e) = open::that_detached(&uri) {
                     log::warn!("could not open hyperlink: {e}");
@@ -1451,6 +1641,15 @@ impl PrettyApp {
             if self.mouse.selecting {
                 self.mouse.selecting = false;
                 self.mouse.selection_pane = None;
+                if self.config.copy_on_select
+                    && self
+                        .panes
+                        .get(&pane_id)
+                        .map(|pane| pane.term.selection_present())
+                        .unwrap_or(false)
+                {
+                    self.copy_selection();
+                }
             } else {
                 let mode = self.panes.get(&pane_id).map(|p| p.term.mode()).unwrap_or_default();
                 if mode.intersects(TermMode::MOUSE_MODE) && !shift {
@@ -1563,7 +1762,11 @@ impl PrettyApp {
             Ime::Commit(text) => {
                 log::debug!("IME commit: {} bytes", text.len());
                 self.ime_preedit.clear();
-                if !self.settings.open && self.context_menu.is_none() && !egui_consumed {
+                if !self.settings.open
+                    && !self.search.open
+                    && self.context_menu.is_none()
+                    && !egui_consumed
+                {
                     self.write_to_focused(text.as_bytes());
                 }
                 if let Some(w) = &self.window {
@@ -1572,7 +1775,7 @@ impl PrettyApp {
             }
             Ime::Preedit(text, _range) => {
                 log::debug!("IME preedit: {} bytes", text.len());
-                if !self.settings.open && !egui_consumed {
+                if !self.settings.open && !self.search.open && !egui_consumed {
                     self.ime_preedit = text;
                     if let Some(w) = &self.window {
                         w.request_redraw();
@@ -1715,6 +1918,8 @@ impl PrettyApp {
                             if let Some(pane) = self.panes.get_mut(&g.pane) {
                                 pane.term.clear_selection();
                             }
+                        } else if g.selecting && g.moved && self.config.copy_on_select {
+                            self.copy_selection();
                         }
                     }
                 }
@@ -1760,7 +1965,7 @@ impl PrettyApp {
     }
 
     fn handle_file_drop(&mut self, path: PathBuf) {
-        if self.settings.open {
+        if self.settings.open || self.search.open {
             return;
         }
         let path_text = path.to_string_lossy();
@@ -1789,7 +1994,7 @@ impl PrettyApp {
                 self.settings.open = true;
                 self.settings.draft = self.config.clone();
             }
-            ContextAction::Quit => self.exit_requested = true,
+            ContextAction::Quit => self.request_exit(),
         }
         if let Some(w) = &self.window {
             w.request_redraw();
@@ -1797,6 +2002,14 @@ impl PrettyApp {
     }
 
     fn update_ime_area(&mut self, frames: &[(Rect, PaneId, pretty_core::Frame)]) {
+        // While the settings panel or the find box owns keyboard input, the
+        // candidate window must follow *their* text cursor. egui-winit sets
+        // that area from the platform output; overriding it with the terminal
+        // cursor put the IME popup in the wrong corner of the window.
+        if self.settings.open || self.search.open {
+            self.ime_cursor = None;
+            return;
+        }
         let Some(window) = &self.window else { return };
         let Some(renderer) = &self.renderer else { return };
         let Some((rect, _, frame)) = frames.iter().find(|(_, id, _)| *id == self.focused) else {
@@ -1808,13 +2021,14 @@ impl PrettyApp {
             return;
         };
         let metrics = renderer.cell_metrics();
-        let padding = self.config.padding;
+        // `metrics.padding` is already in physical pixels (config padding times
+        // the DPI scale); the old code added the logical value on top, which
+        // misplaced the candidate window by (scale-1)*padding on HiDPI.
+        let padding = metrics.padding;
         let x = rect.x + padding + cursor.col as f32 * metrics.cell_w;
         let y = rect.y + padding + cursor.row as f32 * metrics.cell_h;
-        self.ime_cursor = Some(egui::pos2(
-            x / self.scale_factor as f32,
-            y / self.scale_factor as f32,
-        ));
+        let ppp = self.ui_ppp();
+        self.ime_cursor = Some(egui::pos2(x / ppp, y / ppp));
         window.set_ime_cursor_area(
             PhysicalPosition::new(x as f64, y as f64),
             PhysicalSize::new(metrics.cell_w.max(1.0) as u32, metrics.cell_h.max(1.0) as u32),
@@ -1832,7 +2046,12 @@ impl PrettyApp {
 
     fn build_ui_paint(&mut self) -> Option<UiPaint> {
         let window = self.window.clone()?;
-        self.egui_ctx.set_pixels_per_point(window.scale_factor() as f32);
+        self.apply_ui_scale();
+        // Keep the draft fresh while the panel is closed: opening it from the
+        // gear button used to resurrect values from before a zoom shortcut or a
+        // context-menu change, silently reverting them on the next edit.
+        self.settings.sync(&self.config);
+        let ppp = self.ui_ppp();
         let (gpu, metrics, font_family) = {
             let r = self.renderer.as_ref()?;
             (r.gpu.info.clone(), r.cell_metrics(), r.font_family().to_owned())
@@ -1861,6 +2080,8 @@ impl PrettyApp {
             font_family,
         };
         let mut changed = false;
+        let mut import_path: Option<PathBuf> = None;
+        let mut resize_request: Option<(u32, u32)> = None;
         let lang = self.lang;
         let has_selection = self
             .panes
@@ -1889,27 +2110,57 @@ impl PrettyApp {
         let search_open = self.search.open;
         let search_matches = self.search.matches.len();
         let search_current = self.search.current;
-        let tab_bar_width = (window.inner_size().width as f64 / self.scale_factor - 128.0).max(160.0) as f32;
-        let tab_bar_margin = (6.0 * self.scale_factor as f32).round();
+        // Tab bar geometry is expressed in egui points so it follows both the
+        // HiDPI scale factor and the user's UI scale exactly like the layout
+        // margin. The old code passed physical pixels as points, which doubled
+        // the margin on 2x displays.
+        let tab_bar_visible = self.config.tab_bar_visible;
+        let tab_bar_height_points = self.config.tab_bar_height.clamp(18.0, 64.0);
+        let margin_points = 6.0_f32;
+        let tab_bar_width = (window.inner_size().width as f32 / ppp - 132.0).max(240.0);
+        let search_top = if tab_bar_visible {
+            margin_points + tab_bar_height_points + 8.0
+        } else {
+            margin_points + 8.0
+        };
+        let new_tab_hint = self.shortcut_hint("new_tab");
+        let find_hint = self.shortcut_hint("find");
+        let shortcuts = self.config.shortcuts.clone();
+        let accent = pretty_core::Rgb::parse_hex(&self.config.ui_accent)
+            .unwrap_or(pretty_core::Rgb::new(0x7a, 0xa2, 0xf7));
+        let bell_color = egui::Color32::from_rgb(accent.r, accent.g, accent.b);
         let drop_hover = self.drop_hover.clone();
         let preedit = self.ime_preedit.clone();
         let ime_cursor = self.ime_cursor;
+        let confirm_dialog_open = self.confirm_close_dialog;
+        let bell_flash = self
+            .bell_flash_until
+            .filter(|until| Instant::now() < *until)
+            .is_some();
+        let mut confirm_quit = false;
+        let mut confirm_cancel = false;
         let (output, output_cursor) = {
             let state = self.egui_state.as_mut()?;
             let raw_input = state.take_egui_input(&window);
             let output = self.egui_ctx.run_ui(raw_input, |root| {
-                tab_action = show_tab_bar(
-                    root.ctx(),
-                    &tab_labels,
-                    active_tab,
-                    tab_bar_margin,
-                    tab_bar_width,
-                );
+                if tab_bar_visible {
+                    tab_action = show_tab_bar(
+                        root.ctx(),
+                        &tab_labels,
+                        active_tab,
+                        margin_points,
+                        tab_bar_height_points,
+                        tab_bar_width,
+                        &new_tab_hint,
+                        &find_hint,
+                        lang,
+                    );
+                }
                 if search_open {
                     egui::Window::new(tr(lang, "Find"))
                         .id(egui::Id::new("pretty-search"))
-                        .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 44.0))
-                                        .resizable(false)
+                        .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, search_top))
+                        .resizable(false)
                         .collapsible(false)
                         .show(root.ctx(), |ui| {
                             ui.horizontal(|ui| {
@@ -1932,43 +2183,45 @@ impl PrettyApp {
                                 } else if search_matches > 0 {
                                     ui.label(format!("{}/{}", search_current + 1, search_matches));
                                 }
-                                if response.changed() {
-                                    // refresh after the closure so the terminal
-                                    // selection can be updated safely.
-                                }
                             });
                             if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                                 search_next = true;
                             }
                         });
                 }
-                changed = settings::show(
+                let outcome = settings::show(
                     root.ctx(),
                     &mut self.settings,
                     &info,
                     env!("CARGO_PKG_VERSION"),
                     lang,
                 );
+                changed = outcome.changed;
+                import_path = outcome.import;
+                resize_request = outcome.resize;
                 if !self.settings.open {
-                    menu_action = menu::show(root.ctx(), &mut menu_open, lang, has_selection);
+                    menu_action =
+                        menu::show(root.ctx(), &mut menu_open, lang, has_selection, &shortcuts);
                 }
                 if let Some(path) = &drop_hover {
-                    egui::Area::new(egui::Id::new("pretty-drop-hint"))
-                        .order(egui::Order::Foreground)
-                        .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -20.0))
-                        .show(root.ctx(), |ui| {
-                            egui::Frame::popup(ui.style())
-                                .fill(egui::Color32::from_rgb(24, 31, 43))
-                                .show(ui, |ui| {
-                                    ui.label(format!(
-                                        "{}: {}",
-                                        tr(lang, "Drop file to insert its path"),
-                                        path.display()
-                                    ));
-                                });
-                        });
+                    if !self.settings.open && !confirm_dialog_open {
+                        egui::Area::new(egui::Id::new("pretty-drop-hint"))
+                            .order(egui::Order::Foreground)
+                            .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -20.0))
+                            .show(root.ctx(), |ui| {
+                                egui::Frame::popup(ui.style())
+                                    .fill(egui::Color32::from_rgb(24, 31, 43))
+                                    .show(ui, |ui| {
+                                        ui.label(format!(
+                                            "{}: {}",
+                                            tr(lang, "Drop file to insert its path"),
+                                            path.display()
+                                        ));
+                                    });
+                            });
+                    }
                 }
-                if !preedit.is_empty() {
+                if !preedit.is_empty() && !self.settings.open && !search_open {
                     let p = ime_cursor.unwrap_or(egui::pos2(24.0, 48.0));
                     egui::Area::new(egui::Id::new("pretty-ime-preedit"))
                         .order(egui::Order::Tooltip)
@@ -1980,6 +2233,44 @@ impl PrettyApp {
                                     ui.label(&preedit);
                                 });
                         });
+                }
+                if confirm_dialog_open {
+                    let modal = egui::Modal::new(egui::Id::new("pretty-confirm-quit")).show(
+                        root.ctx(),
+                        |ui| {
+                            ui.set_min_width(320.0);
+                            ui.heading(tr(lang, "Close Pretty?"));
+                            ui.label(tr(
+                                lang,
+                                "Running terminal sessions will be terminated.",
+                            ));
+                            ui.add_space(8.0);
+                            ui.horizontal(|ui| {
+                                if ui.button(tr(lang, "Quit")).clicked() {
+                                    confirm_quit = true;
+                                }
+                                if ui.button(tr(lang, "Cancel")).clicked() {
+                                    confirm_cancel = true;
+                                }
+                            });
+                        },
+                    );
+                    let _ = modal;
+                }
+                if bell_flash {
+                    // Visual bell: a short accent-coloured border flash. The
+                    // repaint timer is driven from `about_to_wait`.
+                    let screen = root.ctx().content_rect();
+                    let painter = root.ctx().layer_painter(egui::LayerId::new(
+                        egui::Order::Foreground,
+                        egui::Id::new("pretty-visual-bell"),
+                    ));
+                    painter.rect_stroke(
+                        screen.shrink(3.0),
+                        egui::CornerRadius::same(0),
+                        egui::Stroke::new(3.0, bell_color),
+                        egui::StrokeKind::Inside,
+                    );
                 }
             });
             let cursor = egui_cursor_icon(&output.platform_output);
@@ -2020,7 +2311,24 @@ impl PrettyApp {
             self.config.validate();
             self.settings.draft = self.config.clone();
             self.config_changed();
-            self.pending_ui_apply = true;
+        }
+        if let Some(path) = import_path {
+            self.perform_kitty_import(&path);
+        }
+        if let Some((width, height)) = resize_request {
+            let width = width.clamp(320, 7680);
+            let height = height.clamp(200, 4320);
+            self.config.window_width = width;
+            self.config.window_height = height;
+            let _ = window.request_inner_size(LogicalSize::new(width as f64, height as f64));
+            self.config_changed();
+        }
+        if confirm_quit {
+            self.confirm_close_dialog = false;
+            self.flush_config_save();
+            self.exit_requested = true;
+        } else if confirm_cancel {
+            self.confirm_close_dialog = false;
         }
         let pixels_per_point = output.pixels_per_point;
         let primitives = self.egui_ctx.tessellate(output.shapes, pixels_per_point);
@@ -2223,10 +2531,18 @@ impl ApplicationHandler<UserEvent> for PrettyApp {
         }
         match event {
             WindowEvent::CloseRequested => {
-                if let Some(w) = &self.window {
-                    w.set_visible(false);
+                if self.confirm_close_dialog {
+                    return;
                 }
-                std::process::exit(0);
+                if self.config.confirm_close {
+                    self.confirm_close_dialog = true;
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
+                self.flush_config_save();
+                self.exit_requested = true;
             }
             WindowEvent::Resized(size) => {
                 self.context_menu = None;
@@ -2240,7 +2556,7 @@ impl ApplicationHandler<UserEvent> for PrettyApp {
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 self.scale_factor = scale_factor;
-                self.egui_ctx.set_pixels_per_point(scale_factor as f32);
+                self.apply_ui_scale();
                 if let Some(r) = self.renderer.as_mut() {
                     if let Err(e) = r.set_scale_factor(scale_factor as f32) {
                         log::error!("failed to apply scale factor: {e}");
@@ -2255,21 +2571,17 @@ impl ApplicationHandler<UserEvent> for PrettyApp {
                 self.modifiers = m.state();
             }
             WindowEvent::KeyboardInput { event, .. } => {
-                if event.state == ElementState::Pressed {
-                    if self.modifiers.control_key() && matches!(&event.logical_key, WinitKey::Character(s) if s == ",") {
-                        self.settings.open = !self.settings.open;
-                        self.context_menu = None;
-                        if self.settings.open {
-                            self.settings.draft = self.config.clone();
-                        }
+                if event.state == ElementState::Pressed
+                    && event.logical_key.as_ref() == WinitKey::Named(WinitNamedKey::Escape)
+                {
+                    if self.confirm_close_dialog {
+                        self.confirm_close_dialog = false;
                         if let Some(w) = &self.window {
                             w.request_redraw();
                         }
                         return;
                     }
-                    if event.logical_key.as_ref() == WinitKey::Named(WinitNamedKey::Escape)
-                        && (self.settings.open || self.context_menu.is_some())
-                    {
+                    if self.settings.open || self.context_menu.is_some() {
                         self.settings.open = false;
                         self.context_menu = None;
                         if let Some(w) = &self.window {
@@ -2278,9 +2590,11 @@ impl ApplicationHandler<UserEvent> for PrettyApp {
                         return;
                     }
                 }
-                if self.settings.open || self.context_menu.is_some() {
-                    return;
-                }
+                // The hard-coded Ctrl+, handler is gone: the "settings" action
+                // is configurable now, so rebinding or clearing it in
+                // Settings -> Keyboard actually applies. process_key handles
+                // shortcuts while an overlay is open and stops before text is
+                // forwarded to the terminal.
                 self.process_key(&event);
             }
             WindowEvent::Ime(ime) => {
@@ -2290,15 +2604,20 @@ impl ApplicationHandler<UserEvent> for PrettyApp {
                 self.process_touch(touch, egui_consumed);
             }
             WindowEvent::HoveredFile(path) => {
-                self.drop_hover = Some(path);
-                if let Some(w) = &self.window {
-                    w.set_cursor(winit::window::CursorIcon::Copy);
-                    w.request_redraw();
+                // Do not show the drop hint / copy cursor while the settings
+                // panel is modal on top of the terminal.
+                if !self.settings.open {
+                    self.drop_hover = Some(path);
+                    if let Some(w) = &self.window {
+                        w.set_cursor(winit::window::CursorIcon::Copy);
+                        w.request_redraw();
+                    }
                 }
             }
             WindowEvent::HoveredFileCancelled => {
                 self.drop_hover = None;
                 if let Some(w) = &self.window {
+                    w.set_cursor(winit::window::CursorIcon::Text);
                     w.request_redraw();
                 }
             }
@@ -2321,8 +2640,7 @@ impl ApplicationHandler<UserEvent> for PrettyApp {
             }
             WindowEvent::Focused(focused) => {
                 if focused {
-                    self.blink_on = true;
-                    self.last_blink = Instant::now();
+                    self.reset_blink();
                 }
                 // Do not toggle IME enabled state on focus. Re-enabling a XIM
                 // context makes Fcitx reset the active input method to its
@@ -2362,13 +2680,16 @@ impl ApplicationHandler<UserEvent> for PrettyApp {
         }
         // The user-facing cursor_blink setting must win over a terminal
         // DECSCUSR "steady" style: shells and full-screen programs often emit
-        // `CSI 2 q`, which previously left Blink permanently off. Timer
-        // scheduling is independent of the terminal's cursor style.
-        let blinking = self.config.cursor_blink && !self.settings.open;
+        // `CSI 2 q`, which previously left Blink permanently off. The interval
+        // is configurable (cursor_blink_interval_ms) and independent of the
+        // terminal's cursor style.
+        let interval = self.blink_interval();
+        let blinking =
+            self.config.cursor_blink && !self.settings.open && !self.confirm_close_dialog;
         if blinking {
             let now = Instant::now();
             if now >= self.last_blink {
-                self.last_blink = now + Duration::from_millis(530);
+                self.last_blink = now + interval;
                 self.blink_on = !self.blink_on;
                 if let Some(w) = &self.window {
                     w.request_redraw();
@@ -2384,6 +2705,18 @@ impl ApplicationHandler<UserEvent> for PrettyApp {
                 event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
                     last + Duration::from_millis(220),
                 ));
+            }
+        }
+        // Visual bell: repaint while the border flash is fading out.
+        if let Some(until) = self.bell_flash_until {
+            let now = Instant::now();
+            if now < until {
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+                event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(until));
+            } else {
+                self.bell_flash_until = None;
             }
         }
         // egui's window open/close animation needs frames to advance. The
@@ -2547,6 +2880,15 @@ fn file_uris_to_shell_paths(text: &str) -> Option<String> {
     }
 }
 
+/// Scheme policy for Ctrl+clicked OSC 8 hyperlinks. Untrusted terminal output
+/// must not be able to launch local files or custom protocol handlers through
+/// the desktop opener, so only normal web and mail links are allowed.
+fn is_safe_hyperlink(uri: &str) -> bool {
+    let uri = uri.trim();
+    let lower = uri.to_ascii_lowercase();
+    lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("mailto:")
+}
+
 fn shell_quote_path(path: &str) -> String {
     #[cfg(windows)]
     {
@@ -2560,12 +2902,17 @@ fn shell_quote_path(path: &str) -> String {
 
 /// Load one CJK-capable system font into egui's fallback chain. egui ships
 /// Latin fonts only; without this the Chinese UI would render as tofu.
+#[allow(clippy::too_many_arguments)]
 fn show_tab_bar(
     ctx: &egui::Context,
     labels: &[String],
     active: usize,
     margin: f32,
+    height: f32,
     width: f32,
+    new_tab_hint: &str,
+    find_hint: &str,
+    lang: Lang,
 ) -> Option<TabAction> {
     let mut action = None;
     egui::Area::new(egui::Id::new("pretty-tabs"))
@@ -2578,25 +2925,52 @@ fn show_tab_bar(
                 .inner_margin(egui::Margin::symmetric(4, 2))
                 .show(ui, |ui| {
                     ui.set_width(width);
-                    ui.horizontal(|ui| {
+                    // The configured tab-bar height is honoured by centring a
+                    // row of fixed-height buttons inside it.
+                    ui.set_min_height((height - 6.0).max(16.0));
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                         for (i, label) in labels.iter().enumerate() {
-                            let text = format!("{}  {}", old_tab_label(i), label);
-                            if ui
-                                .selectable_label(i == active, text)
-                                .on_hover_text(label)
-                                .clicked()
-                            {
+                            let text = format!("{}  {}", i + 1, truncate_label(label, 28));
+                            let response = ui
+                                .add(
+                                    egui::Button::selectable(i == active, text)
+                                        .min_size(egui::vec2(0.0, (height - 12.0).max(16.0))),
+                                )
+                                .on_hover_text(format!(
+                                    "{label}\n{}",
+                                    tr(lang, "Click to activate")
+                                ));
+                            if response.clicked() {
                                 action = Some(TabAction::Activate(i));
                             }
-                            if labels.len() > 1 && ui.small_button("×").clicked() {
-                                action = Some(TabAction::Close(i));
+                            if labels.len() > 1 {
+                                let close = ui
+                                    .add(egui::Button::new("×").small().frame(false))
+                                    .on_hover_text(tr(lang, "Close"));
+                                if close.clicked() {
+                                    action = Some(TabAction::Close(i));
+                                }
                             }
                             ui.add_space(2.0);
                         }
-                        if ui.button("+").on_hover_text("New tab (Ctrl+Shift+T)").clicked() {
+                        let new_tab_text = if new_tab_hint.is_empty() {
+                            tr(lang, "New tab").to_owned()
+                        } else {
+                            format!("{} ({new_tab_hint})", tr(lang, "New tab"))
+                        };
+                        if ui.button("+").on_hover_text(new_tab_text).clicked() {
                             action = Some(TabAction::New);
                         }
-                        if ui.button("Find").on_hover_text("Find (Ctrl+Shift+F)").clicked() {
+                        let find_text = if find_hint.is_empty() {
+                            tr(lang, "Find").to_owned()
+                        } else {
+                            format!("{} ({find_hint})", tr(lang, "Find"))
+                        };
+                        if ui
+                            .add(egui::Button::new(tr(lang, "Find")))
+                            .on_hover_text(find_text)
+                            .clicked()
+                        {
                             action = Some(TabAction::Find);
                         }
                     });
@@ -2605,8 +2979,24 @@ fn show_tab_bar(
     action
 }
 
-fn old_tab_label(index: usize) -> String {
-    format!("{}", index + 1)
+/// Truncate a tab label to `max_chars` characters (the full title is still
+/// available as a tooltip). Very long shell titles used to push the close
+/// buttons and `+`/Find controls off the tab bar.
+fn truncate_label(label: &str, max_chars: usize) -> String {
+    if label.chars().count() <= max_chars {
+        return label.to_owned();
+    }
+    let mut short: String = label.chars().take(max_chars.saturating_sub(1)).collect();
+    short.push('…');
+    short
+}
+
+fn cursor_shape_from_config(shape: &str) -> pretty_core::CoreCursorShape {
+    match shape {
+        "beam" => pretty_core::CoreCursorShape::Beam,
+        "underline" => pretty_core::CoreCursorShape::Underline,
+        _ => pretty_core::CoreCursorShape::Block,
+    }
 }
 
 fn cjk_face_index(path: &std::path::Path) -> u32 {
@@ -2728,6 +3118,53 @@ mod tests {
         let defaults = crate::config::default_shortcuts();
         assert_eq!(defaults.get("find").map(String::as_str), Some("Ctrl+Shift+F"));
         assert_eq!(defaults.get("new_tab").map(String::as_str), Some("Ctrl+Shift+T"));
+    }
+
+    #[test]
+    fn tab_labels_are_truncated_with_ellipsis() {
+        assert_eq!(super::truncate_label("short", 10), "short");
+        assert_eq!(super::truncate_label("0123456789", 5), "0123…");
+        // Multi-byte titles must not be cut mid-character.
+        let long = "终端标题终端标题终端标题终端标题";
+        let truncated = super::truncate_label(long, 6);
+        assert_eq!(truncated.chars().count(), 6);
+        assert!(truncated.ends_with('…'));
+    }
+
+    #[test]
+    fn cursor_shape_config_maps_to_core_shapes() {
+        assert!(matches!(
+            super::cursor_shape_from_config("beam"),
+            pretty_core::CoreCursorShape::Beam
+        ));
+        assert!(matches!(
+            super::cursor_shape_from_config("underline"),
+            pretty_core::CoreCursorShape::Underline
+        ));
+        assert!(matches!(
+            super::cursor_shape_from_config("block"),
+            pretty_core::CoreCursorShape::Block
+        ));
+        // Unknown values have already been normalised by Config::validate;
+        // the fallback stays safe.
+        assert!(matches!(
+            super::cursor_shape_from_config("nonsense"),
+            pretty_core::CoreCursorShape::Block
+        ));
+    }
+
+    #[test]
+    fn osc8_hyperlink_scheme_allowlist() {
+        assert!(super::is_safe_hyperlink("https://example.com/a?b=c"));
+        assert!(super::is_safe_hyperlink("HTTP://EXAMPLE.COM"));
+        assert!(super::is_safe_hyperlink("http://localhost:8080"));
+        assert!(super::is_safe_hyperlink("mailto:dev@example.com"));
+        // Dangerous or handler-invoking schemes must be refused.
+        assert!(!super::is_safe_hyperlink("file:///etc/passwd"));
+        assert!(!super::is_safe_hyperlink("javascript:alert(1)"));
+        assert!(!super::is_safe_hyperlink("ms-settings:privacy"));
+        assert!(!super::is_safe_hyperlink("ssh://host"));
+        assert!(!super::is_safe_hyperlink(""));
     }
 
     #[test]
