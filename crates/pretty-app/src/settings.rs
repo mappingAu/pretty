@@ -4,6 +4,7 @@
 //! draft live and debounces the disk write (see `PrettyApp::config_changed`).
 
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use egui::Color32;
 use pretty_renderer::{CellMetrics, GpuInfo};
@@ -16,6 +17,7 @@ enum Tab {
     General,
     Terminal,
     Appearance,
+    TabBar,
     Rendering,
     Keyboard,
     About,
@@ -31,6 +33,9 @@ pub struct SettingsState {
     pub import_status: Option<(bool, String)>,
     /// Set by the import button; consumed by the application after the frame.
     pub pending_import: Option<PathBuf>,
+    /// First click on "Reset all settings" arms the action; a second click
+    /// within a few seconds applies the defaults.
+    reset_armed: Option<Instant>,
 }
 
 impl SettingsState {
@@ -42,6 +47,7 @@ impl SettingsState {
             import_path: String::new(),
             import_status: None,
             pending_import: None,
+            reset_armed: None,
         }
     }
 
@@ -71,6 +77,8 @@ pub struct SettingsOutcome {
     pub import: Option<PathBuf>,
     /// The user asked to resize the window to these logical pixels.
     pub resize: Option<(u32, u32)>,
+    /// The user confirmed a full reset to the built-in defaults.
+    pub reset: bool,
 }
 
 fn screen_metrics(ctx: &egui::Context) -> egui::Rect {
@@ -93,6 +101,7 @@ pub fn show(
     apply_style(ctx, &state.draft);
     let mut outcome = SettingsOutcome::default();
     let mut changed = false;
+    let mut reset = false;
 
     if !state.open {
         egui::Area::new(egui::Id::new("pretty-gear"))
@@ -148,13 +157,22 @@ pub fn show(
                 ui.selectable_value(&mut tab, Tab::General, tr(lang, "General"));
                 ui.selectable_value(&mut tab, Tab::Terminal, tr(lang, "Terminal"));
                 ui.selectable_value(&mut tab, Tab::Appearance, tr(lang, "Appearance"));
+                ui.selectable_value(&mut tab, Tab::TabBar, tr(lang, "Tab bar"));
                 ui.selectable_value(&mut tab, Tab::Rendering, tr(lang, "Rendering"));
                 ui.selectable_value(&mut tab, Tab::Keyboard, tr(lang, "Keyboard"));
                 ui.selectable_value(&mut tab, Tab::About, tr(lang, "About"));
             });
             ui.separator();
+            // auto_shrink vertically: the window should open at its default
+            // size instead of growing to the full screen, while still
+            // scrolling when the content is taller than the window.
+            // Reserve the title bar, tab strip, footer and margins. The old
+            // 128 pt reserve was too small at ui_scale 1.5+, which pushed the
+            // window past the screen edge and clipped the footer buttons.
+            let content_max_h = (max_height - 180.0).max(120.0);
             egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
+                .max_height(content_max_h)
+                .auto_shrink([false, true])
                 .show(ui, |ui| match tab {
                     Tab::General => {
                         general(ui, &mut draft, info, lang, &mut changed, &mut outcome.resize);
@@ -163,6 +181,7 @@ pub fn show(
                     }
                     Tab::Terminal => terminal(ui, &mut draft, lang, &mut changed),
                     Tab::Appearance => appearance(ui, &mut draft, lang, &mut changed),
+                    Tab::TabBar => tab_bar_settings(ui, &mut draft, lang, &mut changed),
                     Tab::Rendering => rendering(ui, &mut draft, info, lang, &mut changed),
                     Tab::Keyboard => keyboard(ui, &mut draft, info, lang, &mut changed),
                     Tab::About => about(ui, version, info, lang),
@@ -172,10 +191,32 @@ pub fn show(
                 if ui.button(tr(lang, "Save now")).clicked() {
                     changed = true;
                 }
-                ui.label(
-                    egui::RichText::new(tr(lang, "Changes are applied live and saved automatically."))
+                if ui.button(tr(lang, "Reset all settings")).clicked() {
+                    let armed = state
+                        .reset_armed
+                        .map(|when| when.elapsed() < Duration::from_secs(4))
+                        .unwrap_or(false);
+                    if armed {
+                        state.reset_armed = None;
+                        reset = true;
+                    } else {
+                        state.reset_armed = Some(Instant::now());
+                    }
+                }
+                if state.reset_armed.is_some() {
+                    ui.colored_label(
+                        Color32::from_rgb(240, 190, 90),
+                        tr(lang, "Click again within 4 s to reset every setting"),
+                    );
+                } else {
+                    ui.label(
+                        egui::RichText::new(tr(
+                            lang,
+                            "Changes are applied live and saved automatically.",
+                        ))
                         .small(),
-                );
+                    );
+                }
             });
         });
     // The import button records a request the application fulfils after this
@@ -189,6 +230,7 @@ pub fn show(
         state.draft = draft;
     }
     outcome.changed = changed;
+    outcome.reset = reset;
     outcome
 }
 
@@ -316,15 +358,34 @@ fn general(
                 *changed = true;
             }
             ui.end_row();
+            ui.label(tr(lang, "Remember window size"))
+                .on_hover_text("kitty.conf: remember_window_size");
+            if ui
+                .checkbox(&mut cfg.remember_window_size, "")
+                .on_hover_text(tr(lang, "Save the last window size when Pretty exits"))
+                .changed()
+            {
+                *changed = true;
+            }
+            ui.end_row();
+            ui.label(tr(lang, "Hide window decorations"))
+                .on_hover_text("kitty.conf: hide_window_decorations");
+            if ui.checkbox(&mut cfg.hide_window_decorations, "").changed() {
+                *changed = true;
+            }
+            ui.end_row();
         });
     ui.horizontal(|ui| {
         if ui.button(tr(lang, "Apply window size")).clicked() {
             *resize = Some((cfg.window_width, cfg.window_height));
         }
         ui.label(
-            egui::RichText::new(tr(lang, "Saved as the startup size; Apply resizes now."))
-                .small()
-                .weak(),
+            egui::RichText::new(tr(
+                lang,
+                "Saved as the startup size; Apply resizes now. Remember window size stores the last size on exit.",
+            ))
+            .small()
+            .weak(),
         );
     });
 
@@ -348,17 +409,21 @@ fn kitty_import_section(ui: &mut egui::Ui, state: &mut SettingsState, lang: Lang
     ui.label(
         egui::RichText::new(tr(
             lang,
-            "Import font, colours, cursor, scrollback, padding, opacity, bell, copy-on-select and key maps from a kitty.conf. Unsupported options are reported, never fatal.",
+            "Import font, colours, cursor, scrollback, padding, opacity, bell, copy-on-select, tab bar, mouse, scrolling and key maps from a kitty.conf. Unsupported options are reported, never fatal.",
         ))
         .small()
         .weak(),
     );
+    let kitty_hint = crate::platform::paths::Paths::host()
+        .kitty_config_file()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "kitty.conf".to_owned());
     ui.horizontal(|ui| {
         ui.label(tr(lang, "Path to kitty.conf"));
         ui.add(
             egui::TextEdit::singleline(&mut state.import_path)
                 .desired_width(320.0)
-                .hint_text("~/.config/kitty/kitty.conf"),
+                .hint_text(kitty_hint),
         );
     });
     ui.horizontal(|ui| {
@@ -429,6 +494,19 @@ fn terminal(ui: &mut egui::Ui, cfg: &mut Config, lang: Lang, changed: &mut bool)
             ui.end_row();
             ui.label(tr(lang, "Cursor colour"));
             *changed |= color_row(ui, &mut cfg.cursor);
+            ui.end_row();
+            ui.label(tr(lang, "Cursor opacity"))
+                .on_hover_text("kitty.conf: cursor_opacity");
+            if ui
+                .add(egui::Slider::new(&mut cfg.cursor_opacity, 0.0..=1.0).fixed_decimals(2))
+                .changed()
+            {
+                *changed = true;
+            }
+            ui.end_row();
+            ui.label(tr(lang, "Cursor text colour"))
+                .on_hover_text("kitty.conf: cursor_text_color (auto = terminal background)");
+            *changed |= optional_color_row(ui, &mut cfg.cursor_text_color, lang);
             ui.end_row();
             ui.label(tr(lang, "Blinking cursor"));
             if ui.checkbox(&mut cfg.cursor_blink, "").changed() {
@@ -512,6 +590,93 @@ fn terminal(ui: &mut egui::Ui, cfg: &mut Config, lang: Lang, changed: &mut bool)
         .small()
         .weak(),
     );
+
+    ui.separator();
+    ui.heading(tr(lang, "Scrolling"))
+        .on_hover_text("kitty.conf: wheel_scroll_multiplier / wheel_scroll_min_lines / scrollbar");
+    egui::Grid::new("scroll-grid")
+        .num_columns(2)
+        .spacing([14.0, 10.0])
+        .show(ui, |ui| {
+            ui.label(tr(lang, "Wheel scroll multiplier"))
+                .on_hover_text("kitty.conf: wheel_scroll_multiplier");
+            if ui
+                .add(
+                    egui::Slider::new(&mut cfg.wheel_scroll_multiplier, 1.0..=10.0)
+                        .fixed_decimals(1)
+                        .suffix("×"),
+                )
+                .changed()
+            {
+                *changed = true;
+            }
+            ui.end_row();
+            ui.label(tr(lang, "Minimum wheel lines"))
+                .on_hover_text("kitty.conf: wheel_scroll_min_lines");
+            if ui
+                .add(egui::Slider::new(&mut cfg.wheel_scroll_min_lines, 1..=10))
+                .changed()
+            {
+                *changed = true;
+            }
+            ui.end_row();
+            ui.label(tr(lang, "Scrollbar")).on_hover_text("kitty.conf: scrollbar");
+            egui::ComboBox::from_id_salt("scrollbar-mode")
+                .selected_text(match cfg.scrollbar.as_str() {
+                    "always" => tr(lang, "Always"),
+                    "never" => tr(lang, "Never"),
+                    _ => tr(lang, "When scrolled"),
+                })
+                .show_ui(ui, |ui| {
+                    if ui
+                        .selectable_value(&mut cfg.scrollbar, "scrolled".to_owned(), tr(lang, "When scrolled"))
+                        .changed()
+                    {
+                        *changed = true;
+                    }
+                    if ui
+                        .selectable_value(&mut cfg.scrollbar, "always".to_owned(), tr(lang, "Always"))
+                        .changed()
+                    {
+                        *changed = true;
+                    }
+                    if ui
+                        .selectable_value(&mut cfg.scrollbar, "never".to_owned(), tr(lang, "Never"))
+                        .changed()
+                    {
+                        *changed = true;
+                    }
+                });
+            ui.end_row();
+        });
+
+    ui.separator();
+    ui.heading(tr(lang, "Mouse"))
+        .on_hover_text("kitty.conf: mouse_hide_wait / focus_follows_mouse");
+    egui::Grid::new("mouse-grid")
+        .num_columns(2)
+        .spacing([14.0, 10.0])
+        .show(ui, |ui| {
+            ui.label(tr(lang, "Hide pointer after"))
+                .on_hover_text("kitty.conf: mouse_hide_wait (0 = never hide)");
+            if ui
+                .add(
+                    egui::Slider::new(&mut cfg.mouse_hide_wait, 0.0..=10.0)
+                        .fixed_decimals(1)
+                        .suffix(" s"),
+                )
+                .changed()
+            {
+                *changed = true;
+            }
+            ui.end_row();
+            ui.label(tr(lang, "Focus follows mouse"))
+                .on_hover_text("kitty.conf: focus_follows_mouse");
+            if ui.checkbox(&mut cfg.focus_follows_mouse, "").changed() {
+                *changed = true;
+            }
+            ui.end_row();
+        });
 
     ui.separator();
     ui.heading(tr(lang, "Session behaviour"));
@@ -694,7 +859,7 @@ fn appearance(ui: &mut egui::Ui, cfg: &mut Config, lang: Lang, changed: &mut boo
             ui.label(tr(lang, "UI scale"));
             if ui
                 .add(
-                    egui::Slider::new(&mut cfg.ui_scale, 0.75..=2.0)
+                    egui::Slider::new(&mut cfg.ui_scale, 0.6..=2.5)
                         .fixed_decimals(2)
                         .suffix("×"),
                 )
@@ -703,8 +868,123 @@ fn appearance(ui: &mut egui::Ui, cfg: &mut Config, lang: Lang, changed: &mut boo
                 *changed = true;
             }
             ui.end_row();
+        });
+
+    ui.separator();
+    ui.heading(tr(lang, "Dim text and pane borders"));
+    egui::Grid::new("chrome-grid")
+        .num_columns(2)
+        .spacing([14.0, 10.0])
+        .show(ui, |ui| {
+            ui.label(tr(lang, "Dim text strength"))
+                .on_hover_text("kitty.conf: dim_opacity");
+            if ui
+                .add(
+                    egui::Slider::new(&mut cfg.dim_opacity, 0.1..=1.0)
+                        .fixed_decimals(2),
+                )
+                .changed()
+            {
+                *changed = true;
+            }
+            ui.end_row();
+            ui.label(tr(lang, "Focused pane border"))
+                .on_hover_text("kitty.conf: active_border_color (auto = accent colour)");
+            *changed |= optional_color_row(ui, &mut cfg.active_border_color, lang);
+            ui.end_row();
+            ui.label(tr(lang, "Inactive pane border"))
+                .on_hover_text("kitty.conf: inactive_border_color (auto = theme border)");
+            *changed |= optional_color_row(ui, &mut cfg.inactive_border_color, lang);
+            ui.end_row();
+        });
+
+    ui.add_space(4.0);
+}
+
+/// Tab-bar specific settings (kitty `tab_bar_*` options and label templates).
+fn tab_bar_settings(ui: &mut egui::Ui, cfg: &mut Config, lang: Lang, changed: &mut bool) {
+    ui.heading(tr(lang, "Tab bar"))
+        .on_hover_text("kitty.conf: tab_bar_edge / tab_bar_style / tab_bar_align / tab_bar_min_tabs");
+    egui::Grid::new("tab-bar-grid")
+        .num_columns(2)
+        .spacing([14.0, 10.0])
+        .show(ui, |ui| {
             ui.label(tr(lang, "Tab bar"));
             if ui.checkbox(&mut cfg.tab_bar_visible, tr(lang, "Show tab bar")).changed() {
+                *changed = true;
+            }
+            ui.end_row();
+            ui.label(tr(lang, "Edge")).on_hover_text("kitty.conf: tab_bar_edge");
+            egui::ComboBox::from_id_salt("tab-bar-edge")
+                .selected_text(match cfg.tab_bar_edge.as_str() {
+                    "bottom" => tr(lang, "Bottom"),
+                    _ => tr(lang, "Top"),
+                })
+                .show_ui(ui, |ui| {
+                    if ui
+                        .selectable_value(&mut cfg.tab_bar_edge, "top".to_owned(), tr(lang, "Top"))
+                        .changed()
+                    {
+                        *changed = true;
+                    }
+                    if ui
+                        .selectable_value(&mut cfg.tab_bar_edge, "bottom".to_owned(), tr(lang, "Bottom"))
+                        .changed()
+                    {
+                        *changed = true;
+                    }
+                });
+            ui.end_row();
+            ui.label(tr(lang, "Style")).on_hover_text("kitty.conf: tab_bar_style");
+            egui::ComboBox::from_id_salt("tab-bar-style")
+                .selected_text(match cfg.tab_bar_style.as_str() {
+                    "fade" => tr(lang, "Fade"),
+                    "powerline" => tr(lang, "Powerline"),
+                    _ => tr(lang, "Separator"),
+                })
+                .show_ui(ui, |ui| {
+                    for (value, label) in [
+                        ("separator", tr(lang, "Separator")),
+                        ("fade", tr(lang, "Fade")),
+                        ("powerline", tr(lang, "Powerline")),
+                    ] {
+                        if ui
+                            .selectable_value(&mut cfg.tab_bar_style, value.to_owned(), label)
+                            .changed()
+                        {
+                            *changed = true;
+                        }
+                    }
+                });
+            ui.end_row();
+            ui.label(tr(lang, "Alignment")).on_hover_text("kitty.conf: tab_bar_align");
+            egui::ComboBox::from_id_salt("tab-bar-align")
+                .selected_text(match cfg.tab_bar_align.as_str() {
+                    "center" => tr(lang, "Center"),
+                    "right" => tr(lang, "Right"),
+                    _ => tr(lang, "Left"),
+                })
+                .show_ui(ui, |ui| {
+                    for (value, label) in [
+                        ("left", tr(lang, "Left")),
+                        ("center", tr(lang, "Center")),
+                        ("right", tr(lang, "Right")),
+                    ] {
+                        if ui
+                            .selectable_value(&mut cfg.tab_bar_align, value.to_owned(), label)
+                            .changed()
+                        {
+                            *changed = true;
+                        }
+                    }
+                });
+            ui.end_row();
+            ui.label(tr(lang, "Minimum tabs"))
+                .on_hover_text("kitty.conf: tab_bar_min_tabs (hide the bar below this count)");
+            if ui
+                .add(egui::DragValue::new(&mut cfg.tab_bar_min_tabs).range(1..=10))
+                .changed()
+            {
                 *changed = true;
             }
             ui.end_row();
@@ -712,15 +992,92 @@ fn appearance(ui: &mut egui::Ui, cfg: &mut Config, lang: Lang, changed: &mut boo
             if ui
                 .add_enabled(
                     cfg.tab_bar_visible,
-                    egui::Slider::new(&mut cfg.tab_bar_height, 20.0..=48.0).suffix(" pt"),
+                    egui::Slider::new(&mut cfg.tab_bar_height, 18.0..=64.0).suffix(" pt"),
                 )
                 .changed()
             {
                 *changed = true;
             }
             ui.end_row();
+            ui.label(tr(lang, "Tab title template"))
+                .on_hover_text("kitty.conf: tab_title_template ({index}, {title}, {count})");
+            if ui
+                .add(egui::TextEdit::singleline(&mut cfg.tab_title_template).desired_width(220.0))
+                .changed()
+            {
+                *changed = true;
+            }
+            ui.end_row();
+            ui.label(tr(lang, "Active tab template"))
+                .on_hover_text("kitty.conf: active_tab_title_template (empty = same as inactive)");
+            if ui
+                .add(
+                    egui::TextEdit::singleline(&mut cfg.active_tab_title_template)
+                        .hint_text(tr(lang, "Same as normal tabs"))
+                        .desired_width(220.0),
+                )
+                .changed()
+            {
+                *changed = true;
+            }
+            ui.end_row();
+            ui.label(tr(lang, "Tab bar background"))
+                .on_hover_text("kitty.conf: tab_bar_background (auto = theme panel)");
+            *changed |= optional_color_row(ui, &mut cfg.tab_bar_background, lang);
+            ui.end_row();
+            ui.label(tr(lang, "Active tab background"))
+                .on_hover_text("kitty.conf: active_tab_background");
+            *changed |= optional_color_row(ui, &mut cfg.active_tab_background, lang);
+            ui.end_row();
+            ui.label(tr(lang, "Active tab foreground"))
+                .on_hover_text("kitty.conf: active_tab_foreground");
+            *changed |= optional_color_row(ui, &mut cfg.active_tab_foreground, lang);
+            ui.end_row();
+            ui.label(tr(lang, "Inactive tab background"))
+                .on_hover_text("kitty.conf: inactive_tab_background");
+            *changed |= optional_color_row(ui, &mut cfg.inactive_tab_background, lang);
+            ui.end_row();
+            ui.label(tr(lang, "Inactive tab foreground"))
+                .on_hover_text("kitty.conf: inactive_tab_foreground");
+            *changed |= optional_color_row(ui, &mut cfg.inactive_tab_foreground, lang);
+            ui.end_row();
         });
+    ui.label(
+        egui::RichText::new(tr(
+            lang,
+            "Empty colours mean automatic: the value is derived from the active theme and tab-bar style.",
+        ))
+        .small()
+        .weak(),
+    );
     ui.add_space(4.0);
+}
+
+/// Colour picker for an optional colour: an empty string means "automatic".
+fn optional_color_row(ui: &mut egui::Ui, value: &mut String, lang: Lang) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        // An empty value is "automatic"; show a neutral slate swatch instead
+        // of black, which looked like an explicitly chosen colour.
+        let current = pretty_core::Rgb::parse_hex(value)
+            .unwrap_or(pretty_core::Rgb::new(0x3a, 0x46, 0x5c));
+        let mut color = Color32::from_rgb(current.r, current.g, current.b);
+        if ui.color_edit_button_srgba(&mut color).changed() {
+            *value = format!("#{:02x}{:02x}{:02x}", color.r(), color.g(), color.b());
+            changed = true;
+        }
+        if value.is_empty() {
+            ui.label(egui::RichText::new(tr(lang, "Auto")).weak().small());
+        } else if ui
+            .small_button("×")
+            .on_hover_text(tr(lang, "Use the automatic colour"))
+            .clicked()
+        {
+            value.clear();
+            changed = true;
+        }
+    });
+    changed
 }
 
 fn rendering(
@@ -928,7 +1285,9 @@ fn apply_style(ctx: &egui::Context, config: &Config) {
     // context menu and tab-bar labels look blurred next to a terminal; use the
     // same bright foreground for every interactive state.
     let bright = Color32::from_rgb(232, 238, 248);
-    visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, bright);
+    // Checkbox/radio labels use the inactive foreground; the old dim grey made
+    // enabled options look disabled.
+    visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, Color32::from_rgb(214, 224, 239));
     visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, Color32::WHITE);
     visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, Color32::WHITE);
     visuals.widgets.open.fg_stroke = egui::Stroke::new(1.0, Color32::WHITE);

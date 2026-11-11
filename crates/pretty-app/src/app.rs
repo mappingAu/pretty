@@ -2,10 +2,11 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::Receiver;
+use crossbeam_channel::{Receiver, TryRecvError};
 use pretty_core::{
     encode_key, encode_mouse, encode_paste, CursorStyle, Key, KeyEventKind, KeyInput, Layout,
     Modifiers as CoreModifiers, MouseEventKind, PaneId, PtySession, Rect, TermMode,
@@ -32,6 +33,68 @@ use crate::settings::{self, RuntimeInfo, SettingsState};
 #[derive(Clone, Debug)]
 pub enum UserEvent {
     PtyReady(PaneId),
+    /// Wake-up from the blink timer thread. The event loop does not reach
+    /// `about_to_wait` while input events keep arriving, so a control-flow
+    /// deadline alone is not enough to keep the cursor blinking.
+    BlinkTick,
+}
+
+/// Cursor blink phase driven by wall-clock deadlines.
+///
+/// The phase is deliberately independent of frame presentation: any event
+/// (timer tick, redraw, input) may advance it once the deadline has passed, so
+/// a busy event loop can delay a toggle by at most the tick period instead of
+/// freezing the cursor in the on/off state.
+struct BlinkPhase {
+    on: bool,
+    next: Instant,
+}
+
+impl BlinkPhase {
+    /// Start visible and schedule the first toggle one full interval later.
+    fn started(interval: Duration) -> Self {
+        Self {
+            on: true,
+            next: Instant::now() + interval,
+        }
+    }
+
+    /// Restart in the "on" phase. Called when the terminal content or input
+    /// changes so the cursor does not disappear under the user's eyes.
+    fn reset(&mut self, interval: Duration) {
+        self.on = true;
+        self.next = Instant::now() + interval;
+    }
+
+    /// Advance the phase if `now` has reached the deadline.
+    ///
+    /// The next deadline is derived from the previous one (not from `now`), so
+    /// toggles stay at the configured cadence instead of drifting by the
+    /// event-loop latency. A stall longer than one interval resynchronises
+    /// instead of firing a burst of catch-up toggles.
+    fn advance(&mut self, now: Instant, interval: Duration) -> bool {
+        if now < self.next {
+            return false;
+        }
+        self.on = !self.on;
+        let next = self.next + interval;
+        // Drift compensation keeps the cadence on its original grid, but a
+        // toggle that happened just *before* the next deadline must not create
+        // a tiny second phase (the old code could produce a ~35 ms off/on
+        // blip, the visible "cursor flicker" under load). Resynchronise when
+        // the corrected deadline is less than half an interval away.
+        self.next = if next > now + interval / 2 {
+            next
+        } else {
+            now + interval
+        };
+        log::trace!(
+            "cursor blink phase -> {} (next in {:?})",
+            self.on,
+            self.next.saturating_duration_since(now)
+        );
+        true
+    }
 }
 
 pub struct AppOptions {
@@ -245,8 +308,8 @@ pub struct PrettyApp {
     modifiers: ModifiersState,
     mouse: MouseState,
     scale_factor: f64,
-    blink_on: bool,
-    last_blink: Instant,
+    blink: BlinkPhase,
+    blink_thread_stop: Arc<AtomicBool>,
     frame_times: Vec<f32>,
     last_frame: Instant,
     pub failed: bool,
@@ -265,6 +328,12 @@ pub struct PrettyApp {
     drop_hover: Option<PathBuf>,
     ime_preedit: String,
     ime_cursor: Option<egui::Pos2>,
+    /// Last time the pointer moved/clicked, for `mouse_hide_wait`.
+    last_pointer_activity: Instant,
+    /// Whether the OS pointer is currently hidden by the idle timer.
+    pointer_hidden: bool,
+    /// Logical size captured by `remember_window_size`, persisted on exit.
+    pending_window_size: Option<(u32, u32)>,
     touch_positions: HashMap<u64, PhysicalPosition<f64>>,
     touch_scroll_y: Option<f64>,
     touch_scroll_pane: Option<PaneId>,
@@ -293,6 +362,29 @@ impl PrettyApp {
         let egui_ctx = egui::Context::default();
         install_ui_font(&egui_ctx);
         egui_ctx.set_zoom_factor(config.ui_scale.clamp(0.5, 2.5));
+        // A 16 ms tick bounds blink jitter to ~one frame and, unlike
+        // `ControlFlow::WaitUntil`, still fires while a flood of pointer events
+        // keeps the loop from reaching `about_to_wait`.
+        let initial_blink_interval =
+            Duration::from_millis(config.cursor_blink_interval_ms.clamp(50, 5_000) as u64);
+        let blink_thread_stop = Arc::new(AtomicBool::new(false));
+        {
+            let proxy = proxy.clone();
+            let stop = Arc::clone(&blink_thread_stop);
+            if let Err(e) = std::thread::Builder::new()
+                .name("pretty-blink".into())
+                .spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        std::thread::sleep(Duration::from_millis(16));
+                        if stop.load(Ordering::Relaxed) || proxy.send_event(UserEvent::BlinkTick).is_err() {
+                            break;
+                        }
+                    }
+                })
+            {
+                log::warn!("cursor blink timer thread unavailable: {e}");
+            }
+        }
         Self {
             config,
             options,
@@ -317,8 +409,8 @@ impl PrettyApp {
             modifiers: ModifiersState::default(),
             mouse: MouseState::default(),
             scale_factor: 1.0,
-            blink_on: true,
-            last_blink: Instant::now(),
+            blink: BlinkPhase::started(initial_blink_interval),
+            blink_thread_stop,
             frame_times: Vec::new(),
             last_frame: Instant::now(),
             failed: false,
@@ -337,6 +429,9 @@ impl PrettyApp {
             drop_hover: None,
             ime_preedit: String::new(),
             ime_cursor: None,
+            last_pointer_activity: Instant::now(),
+            pointer_hidden: false,
+            pending_window_size: None,
             touch_positions: HashMap::new(),
             touch_scroll_y: None,
             touch_scroll_pane: None,
@@ -360,8 +455,56 @@ impl PrettyApp {
     }
 
     fn reset_blink(&mut self) {
-        self.blink_on = true;
-        self.last_blink = Instant::now() + self.blink_interval();
+        self.blink.reset(self.blink_interval());
+    }
+
+    /// True when the cursor should be blinking right now.
+    fn blink_active(&self) -> bool {
+        self.config.cursor_blink && !self.settings.open && !self.confirm_close_dialog
+    }
+
+    /// Advance the blink phase if the deadline passed. Returns true when the
+    /// visible phase changed and a redraw is needed.
+    fn advance_blink(&mut self) -> bool {
+        if !self.blink_active() {
+            return false;
+        }
+        let interval = self.blink_interval();
+        self.blink.advance(Instant::now(), interval)
+    }
+
+    /// Record pointer activity and reveal an idle-hidden pointer.
+    fn note_pointer_activity(&mut self) {
+        self.last_pointer_activity = Instant::now();
+        if self.pointer_hidden {
+            if let Some(window) = &self.window {
+                window.set_cursor_visible(true);
+            }
+            self.pointer_hidden = false;
+        }
+    }
+
+    /// Apply the kitty `mouse_hide_wait` policy. Called from the blink tick so
+    /// it works even while no frames are being produced.
+    fn update_pointer_visibility(&mut self) {
+        let Some(window) = &self.window else { return };
+        if self.config.mouse_hide_wait <= 0.0 {
+            if self.pointer_hidden {
+                window.set_cursor_visible(true);
+                self.pointer_hidden = false;
+            }
+            return;
+        }
+        let timeout = Duration::from_secs_f32(self.config.mouse_hide_wait.clamp(0.0, 60.0));
+        let idle = self.last_pointer_activity.elapsed();
+        let hide = idle >= timeout && !self.settings.open && !self.confirm_close_dialog;
+        if hide && !self.pointer_hidden {
+            window.set_cursor_visible(false);
+            self.pointer_hidden = true;
+        } else if !hide && self.pointer_hidden {
+            window.set_cursor_visible(true);
+            self.pointer_hidden = false;
+        }
     }
 
     /// Persist a pending debounced UI edit immediately. `std::process::exit`
@@ -440,6 +583,7 @@ impl PrettyApp {
                 self.config.window_height as f64,
             ))
             .with_transparent(transparent_window)
+            .with_decorations(!self.config.hide_window_decorations)
             .with_visible(true);
         let attrs = if self.options.fullscreen {
             attrs.with_fullscreen(Some(Fullscreen::Borderless(None)))
@@ -564,12 +708,14 @@ impl PrettyApp {
         let size = self.window.as_ref().map(|w| w.inner_size()).unwrap_or(PhysicalSize::new(1280, 800));
         let margin = self.ui_margin();
         let tab_h = self.tab_bar_height();
-        let top = margin + tab_h;
+        let bottom_edge = self.config.tab_bar_edge == "bottom";
+        let top = if bottom_edge { margin } else { margin + tab_h };
+        let bottom = margin + if bottom_edge { tab_h } else { 0.0 };
         Rect::new(
             margin,
             top,
             (size.width as f32 - margin * 2.0).max(1.0),
-            (size.height as f32 - top - margin).max(1.0),
+            (size.height as f32 - top - bottom).max(1.0),
         )
     }
 
@@ -579,8 +725,17 @@ impl PrettyApp {
         (6.0 * self.ui_ppp()).round()
     }
 
-    fn tab_bar_height(&self) -> f32 {
+    /// Whether the tab bar is currently shown, honouring `tab_bar_min_tabs`.
+    fn tab_bar_shown(&self) -> bool {
         if !self.config.tab_bar_visible {
+            return false;
+        }
+        let minimum = self.config.tab_bar_min_tabs.max(1);
+        self.tabs.len() >= minimum
+    }
+
+    fn tab_bar_height(&self) -> f32 {
+        if !self.tab_bar_shown() {
             return 0.0;
         }
         (self.config.tab_bar_height.clamp(18.0, 64.0) * self.ui_ppp()).round()
@@ -1072,6 +1227,7 @@ impl PrettyApp {
             }
         }
         if let Some(window) = &self.window {
+            window.set_decorations(!self.config.hide_window_decorations);
             if self.config.blur {
                 if let Err(e) = platform::apply_compositor_effects(window, self.config.blur, self.config.opacity) {
                     log::warn!("blur unavailable: {e}");
@@ -1079,6 +1235,14 @@ impl PrettyApp {
             } else {
                 let _ = platform::apply_compositor_effects(window, false, self.config.opacity);
             }
+        }
+        // The tab bar edge/height/min-tabs affect how many cells fit.
+        self.resize_all();
+        // Apply the scrollback limit to live terminals, not only to panes
+        // created afterwards (the settings slider used to need a new tab).
+        let scrollback = self.config.scrollback;
+        for pane in self.panes.values_mut() {
+            pane.term.set_scrollback(scrollback);
         }
         self.last_ui_change = Some(Instant::now());
         self.pending_ui_apply = true;
@@ -1337,17 +1501,24 @@ impl PrettyApp {
 
     fn handle_pty(&mut self, id: PaneId, event_loop: &ActiveEventLoop) {
         let mut chunks = Vec::new();
+        let mut disconnected = false;
         {
             let Some(pane) = self.panes.get(&id) else { return };
-            while let Ok(chunk) = pane.pty_rx.try_recv() {
-                chunks.push(chunk);
-
+            loop {
+                match pane.pty_rx.try_recv() {
+                    Ok(chunk) => chunks.push(chunk),
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        disconnected = true;
+                        break;
+                    }
+                }
             }
         }
-        if chunks.is_empty() {
+        if chunks.is_empty() && !disconnected {
             return;
         }
-        {
+        if !chunks.is_empty() {
             let Some(pane) = self.panes.get_mut(&id) else { return };
             for chunk in chunks {
                 pane.term.advance(&chunk);
@@ -1355,6 +1526,13 @@ impl PrettyApp {
         }
         self.reset_blink();
         self.handle_terminal_events(id);
+        if disconnected {
+            // The PTY reader thread ends on EOF: the child exited and all of
+            // its output has been drained. The old code ignored this and kept
+            // a frozen, dead terminal (and its PTY handles) forever.
+            log::info!("pane {:?} child exited (PTY closed); removing the pane", id);
+            self.close_pane(id);
+        }
         if let Some(w) = &self.window {
             w.request_redraw();
         }
@@ -1551,12 +1729,34 @@ impl PrettyApp {
 
     fn process_mouse_input(&mut self, event_loop: &ActiveEventLoop, state: ElementState, button: WinitMouseButton, egui_consumed: bool) {
         let Some(pos) = self.mouse.position else { return };
-        let Some((pane_id, col, row)) = self.pane_at(pos.x, pos.y) else {
-            if state == ElementState::Released {
-                self.mouse.button = None;
-                self.mouse.selecting = false;
+        let hit = self.pane_at(pos.x, pos.y);
+        let (pane_id, col, row) = match hit {
+            Some(cell) => cell,
+            None => {
+                if state != ElementState::Released {
+                    return;
+                }
+                // The pointer left the pane (or the terminal area) while a
+                // button was held. The release must still reach the pane that
+                // received the press, otherwise TUIs stay stuck in drag/select
+                // state until another click.
+                let Some(id) = self
+                    .mouse
+                    .selection_pane
+                    .or_else(|| self.mouse.last_cell.map(|(id, _, _)| id))
+                else {
+                    self.mouse.button = None;
+                    self.mouse.selecting = false;
+                    return;
+                };
+                let (col, row) = self
+                    .mouse
+                    .last_cell
+                    .filter(|(last_id, _, _)| *last_id == id)
+                    .map(|(_, c, r)| (c, r))
+                    .unwrap_or((0, 0));
+                (id, col, row)
             }
-            return;
         };
         log::debug!(
             "mouse input state={:?} button={:?} at {:?} consumed={} menu={:?}",
@@ -1674,6 +1874,20 @@ impl PrettyApp {
             return;
         }
         let Some((pane_id, col, row)) = self.pane_at(pos.x, pos.y) else { return };
+        // kitty `focus_follows_mouse`: hovering a pane moves keyboard focus
+        // there, but never while a button is held (selection/drag in progress).
+        if self.config.focus_follows_mouse
+            && pane_id != self.focused
+            && self.mouse.button.is_none()
+            && !self.mouse.selecting
+        {
+            self.focused = pane_id;
+            self.update_title();
+            self.save_active_tab();
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+        }
         if self.mouse.selecting && self.mouse.selection_pane == Some(pane_id) {
             if let Some(pane) = self.panes.get_mut(&pane_id) {
                 pane.term.update_selection(row, col);
@@ -1741,12 +1955,11 @@ impl PrettyApp {
             }
             return;
         }
-        let lines = match delta {
-            MouseScrollDelta::LineDelta(_, y) => (y * 3.0) as i32,
-            MouseScrollDelta::PixelDelta(p) => {
-                if p.y.abs() < 1.0 { 0 } else { (p.y / 18.0) as i32 }
-            }
-        };
+        let lines = wheel_scroll_lines(
+            delta,
+            self.config.wheel_scroll_multiplier,
+            self.config.wheel_scroll_min_lines,
+        );
         if lines != 0 {
             if let Some(pane) = self.panes.get_mut(&pane_id) {
                 pane.term.scroll(lines);
@@ -1969,7 +2182,13 @@ impl PrettyApp {
             return;
         }
         let path_text = path.to_string_lossy();
-        let text = format!("{} ", shell_quote_path(&path_text));
+        let Some(quoted) = shell_quote_path(&path_text) else {
+            // Windows cmd.exe expands %VAR% even inside double quotes and has
+            // no escape for it; inserting such a path could inject expansion.
+            log::warn!("refusing to insert a path containing '%' (cmd.exe expansion): {path_text}");
+            return;
+        };
+        let text = format!("{quoted} ");
         let mode = self.panes.get(&self.focused).map(|p| p.term.mode()).unwrap_or_default();
         self.write_to_focused(&encode_paste(mode, &text));
         log::info!("file drop inserted path: {}", path.display());
@@ -2080,6 +2299,7 @@ impl PrettyApp {
             font_family,
         };
         let mut changed = false;
+        let mut reset_request = false;
         let mut import_path: Option<PathBuf> = None;
         let mut resize_request: Option<(u32, u32)> = None;
         let lang = self.lang;
@@ -2091,7 +2311,7 @@ impl PrettyApp {
         let mut menu_open = self.context_menu;
         let mut menu_action = None;
         let mut tab_action = None;
-        let tab_labels: Vec<String> = self
+        let tab_titles: Vec<String> = self
             .tabs
             .iter()
             .enumerate()
@@ -2103,7 +2323,31 @@ impl PrettyApp {
                     .unwrap_or_else(|| format!("Terminal {}", i + 1))
             })
             .collect();
+        let tab_count = tab_titles.len();
+        let tab_labels: Vec<String> = tab_titles
+            .iter()
+            .enumerate()
+            .map(|(i, title)| {
+                let template = if i == self.active_tab
+                    && !self.config.active_tab_title_template.is_empty()
+                {
+                    self.config.active_tab_title_template.as_str()
+                } else if self.config.tab_title_template.is_empty() {
+                    "{index}: {title}"
+                } else {
+                    self.config.tab_title_template.as_str()
+                };
+                expand_tab_title(template, i, title, tab_count)
+            })
+            .collect();
         let active_tab = self.active_tab;
+        let tab_bar_style = self.config.tab_bar_style.clone();
+        let tab_bar_colors = TabBarColors::from_config(
+            &self.config,
+            &self.config.theme(),
+            &tab_bar_style,
+        );
+        let tab_bar_align = self.config.tab_bar_align.clone();
         let mut search_query = self.search.query.clone();
         let mut search_next = false;
         let mut search_close = false;
@@ -2114,12 +2358,25 @@ impl PrettyApp {
         // HiDPI scale factor and the user's UI scale exactly like the layout
         // margin. The old code passed physical pixels as points, which doubled
         // the margin on 2x displays.
-        let tab_bar_visible = self.config.tab_bar_visible;
+        let tab_bar_visible = self.tab_bar_shown();
         let tab_bar_height_points = self.config.tab_bar_height.clamp(18.0, 64.0);
         let margin_points = 6.0_f32;
-        let tab_bar_width = (window.inner_size().width as f32 / ppp - 132.0).max(240.0);
+        let window_size = window.inner_size();
+        let window_width_points = window_size.width as f32 / ppp;
+        let window_height_points = window_size.height as f32 / ppp;
+        let tab_bar_width = (window_width_points - 132.0).max(240.0);
+        let tab_bar_bottom = self.config.tab_bar_edge == "bottom";
+        let tab_bar_top = if tab_bar_bottom {
+            (window_height_points - margin_points - tab_bar_height_points).max(margin_points)
+        } else {
+            margin_points
+        };
         let search_top = if tab_bar_visible {
-            margin_points + tab_bar_height_points + 8.0
+            if tab_bar_bottom {
+                margin_points + 8.0
+            } else {
+                margin_points + tab_bar_height_points + 8.0
+            }
         } else {
             margin_points + 8.0
         };
@@ -2149,8 +2406,12 @@ impl PrettyApp {
                         &tab_labels,
                         active_tab,
                         margin_points,
+                        tab_bar_top,
                         tab_bar_height_points,
                         tab_bar_width,
+                        &tab_bar_style,
+                        &tab_bar_align,
+                        &tab_bar_colors,
                         &new_tab_hint,
                         &find_hint,
                         lang,
@@ -2197,6 +2458,7 @@ impl PrettyApp {
                     lang,
                 );
                 changed = outcome.changed;
+                reset_request = outcome.reset;
                 import_path = outcome.import;
                 resize_request = outcome.resize;
                 if !self.settings.open {
@@ -2306,7 +2568,15 @@ impl PrettyApp {
                 }
             }
         }
-        if changed {
+        if reset_request {
+            // A confirmed "Reset all settings" discards the draft and restores
+            // every documented default, including the language and shortcuts.
+            self.config = Config::default();
+            self.config.validate();
+            self.settings.draft = self.config.clone();
+            self.settings.sync(&self.config);
+            self.config_changed();
+        } else if changed {
             self.config = self.settings.draft.clone();
             self.config.validate();
             self.settings.draft = self.config.clone();
@@ -2343,6 +2613,10 @@ impl PrettyApp {
         if self.window.is_none() || self.renderer.is_none() {
             return;
         }
+        // A frame drawn at (or after) the blink deadline flips the phase, so a
+        // coalesced timer tick can never leave the cursor stuck in the wrong
+        // state; no extra redraw is needed because this frame already paints it.
+        self.advance_blink();
         // Egui builds the settings/gear each frame. This also applies changes.
         let ui = self.build_ui_paint();
         if let Some(window) = &self.window {
@@ -2357,7 +2631,7 @@ impl PrettyApp {
             let mut frame = pane.term.snapshot();
             if id != self.focused {
                 frame.cursor = None;
-            } else if !self.settings.open && self.config.cursor_blink && !self.blink_on {
+            } else if !self.settings.open && self.config.cursor_blink && !self.blink.on {
                 if let Some(c) = frame.cursor.as_mut() {
                     c.off = true;
                 }
@@ -2509,6 +2783,14 @@ impl ApplicationHandler<UserEvent> for PrettyApp {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::PtyReady(id) => self.handle_pty(id, event_loop),
+            UserEvent::BlinkTick => {
+                if self.advance_blink() {
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                }
+                self.update_pointer_visibility();
+            }
         }
     }
 
@@ -2529,6 +2811,15 @@ impl ApplicationHandler<UserEvent> for PrettyApp {
                 w.request_redraw();
             }
         }
+        if matches!(
+            &event,
+            WindowEvent::CursorMoved { .. }
+                | WindowEvent::MouseInput { .. }
+                | WindowEvent::MouseWheel { .. }
+                | WindowEvent::Touch(_)
+        ) {
+            self.note_pointer_activity();
+        }
         match event {
             WindowEvent::CloseRequested => {
                 if self.confirm_close_dialog {
@@ -2548,6 +2839,16 @@ impl ApplicationHandler<UserEvent> for PrettyApp {
                 self.context_menu = None;
                 if let Some(r) = self.renderer.as_mut() {
                     r.resize(size.width.max(1), size.height.max(1));
+                }
+                if self.config.remember_window_size {
+                    if let Some(window) = &self.window {
+                        if !window.is_maximized() && window.fullscreen().is_none() {
+                            let logical = size.to_logical::<f64>(self.scale_factor);
+                            let width = (logical.width.round() as u32).clamp(320, 7680);
+                            let height = (logical.height.round() as u32).clamp(200, 4320);
+                            self.pending_window_size = Some((width, height));
+                        }
+                    }
                 }
                 self.resize_all();
                 if let Some(w) = &self.window {
@@ -2636,6 +2937,7 @@ impl ApplicationHandler<UserEvent> for PrettyApp {
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 self.last_ui_change = Some(Instant::now());
+                log::trace!("wheel delta={delta:?} egui_consumed={egui_consumed}");
                 self.process_wheel(delta, egui_consumed);
             }
             WindowEvent::Focused(focused) => {
@@ -2683,19 +2985,13 @@ impl ApplicationHandler<UserEvent> for PrettyApp {
         // `CSI 2 q`, which previously left Blink permanently off. The interval
         // is configurable (cursor_blink_interval_ms) and independent of the
         // terminal's cursor style.
-        let interval = self.blink_interval();
-        let blinking =
-            self.config.cursor_blink && !self.settings.open && !self.confirm_close_dialog;
-        if blinking {
-            let now = Instant::now();
-            if now >= self.last_blink {
-                self.last_blink = now + interval;
-                self.blink_on = !self.blink_on;
-                if let Some(w) = &self.window {
-                    w.request_redraw();
-                }
+        if self.advance_blink() {
+            if let Some(w) = &self.window {
+                w.request_redraw();
             }
-            event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(self.last_blink));
+        }
+        if self.blink_active() {
+            event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(self.blink.next));
         } else {
             event_loop.set_control_flow(winit::event_loop::ControlFlow::Wait);
         }
@@ -2744,6 +3040,16 @@ impl ApplicationHandler<UserEvent> for PrettyApp {
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        self.blink_thread_stop.store(true, Ordering::Relaxed);
+        if self.config.remember_window_size {
+            if let Some((width, height)) = self.pending_window_size.take() {
+                if width != self.config.window_width || height != self.config.window_height {
+                    self.config.window_width = width;
+                    self.config.window_height = height;
+                    self.pending_ui_apply = true;
+                }
+            }
+        }
         // CLI overrides (--opacity/--font-size/--no-blur) are runtime-only and
         // must not silently rewrite the user's persistent configuration. A UI
         // edit made within the 220ms debounce window is still persisted.
@@ -2753,6 +3059,38 @@ impl ApplicationHandler<UserEvent> for PrettyApp {
             }
         }
     }
+}
+
+/// Translate a wheel event into a line count using the kitty
+/// `wheel_scroll_multiplier` and `wheel_scroll_min_lines` settings.
+fn wheel_scroll_lines(delta: MouseScrollDelta, multiplier: f32, min_lines: i32) -> i32 {
+    let multiplier = if multiplier.is_finite() {
+        multiplier.clamp(0.1, 10.0)
+    } else {
+        3.0
+    };
+    let min_lines = min_lines.clamp(1, 20);
+    let raw = match delta {
+        MouseScrollDelta::LineDelta(_, y) => y * multiplier,
+        MouseScrollDelta::PixelDelta(p) => {
+            if p.y.abs() < 0.5 {
+                0.0
+            } else {
+                // 18 physical pixels per text line before the multiplier.
+                ((p.y / 18.0) as f32) * multiplier
+            }
+        }
+    };
+    if raw == 0.0 {
+        return 0;
+    }
+    let lines = raw.round() as i32;
+    let lines = if lines.abs() < min_lines {
+        min_lines * if raw > 0.0 { 1 } else { -1 }
+    } else {
+        lines
+    };
+    lines
 }
 
 fn shell_command(shell: &str, command: &str) -> Vec<String> {
@@ -2871,7 +3209,9 @@ fn file_uris_to_shell_paths(text: &str) -> Option<String> {
         if !path.starts_with('/') {
             return None;
         }
-        paths.push(shell_quote_path(&percent_decode_path(path)));
+        if let Some(quoted) = shell_quote_path(&percent_decode_path(path)) {
+            paths.push(quoted);
+        }
     }
     if paths.is_empty() {
         None
@@ -2889,27 +3229,140 @@ fn is_safe_hyperlink(uri: &str) -> bool {
     lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("mailto:")
 }
 
-fn shell_quote_path(path: &str) -> String {
+/// Quote a dropped/pasted path for the configured shell.
+///
+/// Returns `None` on Windows when the path contains `%`: cmd.exe expands
+/// environment variables inside double quotes and offers no escape, so the
+/// only safe behaviour is to refuse the insertion instead of injecting it.
+fn shell_quote_path(path: &str) -> Option<String> {
     #[cfg(windows)]
     {
-        format!("\"{}\"", path.replace('"', "\\\""))
+        if path.contains('%') {
+            return None;
+        }
+        // CommandLineToArgvW quoting: double backslashes before an embedded
+        // quote (and before the closing quote), then escape the quote itself.
+        let mut out = String::with_capacity(path.len() + 2);
+        out.push('"');
+        let mut backslashes = 0usize;
+        for ch in path.chars() {
+            match ch {
+                '\\' => backslashes += 1,
+                '"' => {
+                    for _ in 0..(backslashes * 2 + 1) {
+                        out.push('\\');
+                    }
+                    out.push('"');
+                    backslashes = 0;
+                }
+                _ => {
+                    for _ in 0..backslashes {
+                        out.push('\\');
+                    }
+                    backslashes = 0;
+                    out.push(ch);
+                }
+            }
+        }
+        for _ in 0..(backslashes * 2) {
+            out.push('\\');
+        }
+        out.push('"');
+        Some(out)
     }
     #[cfg(not(windows))]
     {
-        format!("'{}'", path.replace('\'', "'\\''"))
+        Some(format!("'{}'", path.replace('\'', "'\\''")))
     }
 }
 
 /// Load one CJK-capable system font into egui's fallback chain. egui ships
 /// Latin fonts only; without this the Chinese UI would render as tofu.
 #[allow(clippy::too_many_arguments)]
+struct TabBarColors {
+    background: egui::Color32,
+    active_bg: egui::Color32,
+    active_fg: egui::Color32,
+    inactive_bg: egui::Color32,
+    inactive_fg: egui::Color32,
+}
+
+impl TabBarColors {
+    fn from_config(config: &Config, theme: &pretty_renderer::Theme, style: &str) -> Self {
+        let parse = |value: &str| {
+            pretty_core::Rgb::parse_hex(value).map(|rgb| egui::Color32::from_rgb(rgb.r, rgb.g, rgb.b))
+        };
+        let panel = egui::Color32::from_rgb(theme.panel.r, theme.panel.g, theme.panel.b);
+        let accent = egui::Color32::from_rgb(theme.accent.r, theme.accent.g, theme.accent.b);
+        let foreground =
+            egui::Color32::from_rgb(theme.foreground.r, theme.foreground.g, theme.foreground.b);
+        let active_bg_default = if style == "powerline" {
+            accent
+        } else {
+            egui::Color32::from_rgba_unmultiplied(
+                theme.border.r,
+                theme.border.g,
+                theme.border.b,
+                220,
+            )
+        };
+        let active_fg_default = if style == "powerline" {
+            egui::Color32::from_rgb(12, 16, 24)
+        } else {
+            foreground
+        };
+        Self {
+            background: parse(&config.tab_bar_background).unwrap_or(panel),
+            active_bg: parse(&config.active_tab_background).unwrap_or(active_bg_default),
+            active_fg: parse(&config.active_tab_foreground).unwrap_or(active_fg_default),
+            inactive_bg: parse(&config.inactive_tab_background).unwrap_or(panel),
+            inactive_fg: parse(&config.inactive_tab_foreground)
+                .unwrap_or_else(|| foreground.gamma_multiply(0.72)),
+        }
+    }
+}
+
+/// Build a tab label from a kitty-style template.
+///
+/// Supported placeholders are `{index}` (1-based, matching the tab bar
+/// numbering), `{title}` (the focused pane title) and `{count}` (the number of
+/// open tabs). Unknown placeholders are kept verbatim so a typo is visible
+/// instead of silently disappearing.
+fn expand_tab_title(template: &str, index: usize, title: &str, count: usize) -> String {
+    let mut out = String::with_capacity(template.len() + title.len());
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open..];
+        let Some(close) = after.find('}') else {
+            out.push_str(after);
+            return out;
+        };
+        let key = &after[1..close];
+        match key {
+            "index" => out.push_str(&(index + 1).to_string()),
+            "title" => out.push_str(title),
+            "count" => out.push_str(&count.to_string()),
+            _ => out.push_str(&after[..=close]),
+        }
+        rest = &after[close + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
 fn show_tab_bar(
     ctx: &egui::Context,
     labels: &[String],
     active: usize,
     margin: f32,
+    top: f32,
     height: f32,
     width: f32,
+    style: &str,
+    align: &str,
+    colors: &TabBarColors,
     new_tab_hint: &str,
     find_hint: &str,
     lang: Lang,
@@ -2917,64 +3370,134 @@ fn show_tab_bar(
     let mut action = None;
     egui::Area::new(egui::Id::new("pretty-tabs"))
         .order(egui::Order::Middle)
-        .fixed_pos(egui::pos2(margin, margin))
+        .fixed_pos(egui::pos2(margin, top))
         .show(ctx, |ui| {
-            egui::Frame::new()
-                .fill(egui::Color32::from_rgb(18, 24, 35))
-                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(45, 55, 72)))
-                .inner_margin(egui::Margin::symmetric(4, 2))
-                .show(ui, |ui| {
-                    ui.set_width(width);
-                    // The configured tab-bar height is honoured by centring a
-                    // row of fixed-height buttons inside it.
-                    ui.set_min_height((height - 6.0).max(16.0));
-                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                        for (i, label) in labels.iter().enumerate() {
-                            let text = format!("{}  {}", i + 1, truncate_label(label, 28));
-                            let response = ui
+            let mut frame = egui::Frame::new()
+                .fill(colors.background)
+                .inner_margin(egui::Margin::symmetric(4, 2));
+            match style {
+                "fade" => {
+                    frame = frame.fill(colors.background.gamma_multiply(0.55));
+                }
+                "powerline" => {
+                    frame = frame.fill(colors.background);
+                }
+                _ => {
+                    frame = frame.stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(45, 55, 72)));
+                }
+            }
+            frame.show(ui, |ui| {
+                ui.set_width(width);
+                ui.set_min_height((height - 6.0).max(16.0));
+                let mut draw_tabs = |ui: &mut egui::Ui| {
+                    for (i, label) in labels.iter().enumerate() {
+                        let is_active = i == active;
+                        let text = egui::RichText::new(truncate_label(label, 48)).color(
+                            if is_active { colors.active_fg } else { colors.inactive_fg },
+                        );
+                        let mut button = egui::Button::new(text)
+                            .min_size(egui::vec2(0.0, (height - 12.0).max(16.0)))
+                            .fill(if is_active {
+                                colors.active_bg
+                            } else {
+                                colors.inactive_bg
+                            });
+                        if style == "separator" {
+                            button = button.stroke(egui::Stroke::new(
+                                1.0,
+                                egui::Color32::from_rgb(45, 55, 72),
+                            ));
+                        }
+                        let response = ui.add(button).on_hover_text(format!(
+                            "{label}\n{}",
+                            tr(lang, "Click to activate")
+                        ));
+                        if response.clicked() {
+                            action = Some(TabAction::Activate(i));
+                        }
+                        if labels.len() > 1 {
+                            let close = ui
                                 .add(
-                                    egui::Button::selectable(i == active, text)
-                                        .min_size(egui::vec2(0.0, (height - 12.0).max(16.0))),
+                                    egui::Button::new(
+                                        egui::RichText::new("×")
+                                            .color(colors.inactive_fg)
+                                            .small(),
+                                    )
+                                    .frame(false),
                                 )
-                                .on_hover_text(format!(
-                                    "{label}\n{}",
-                                    tr(lang, "Click to activate")
-                                ));
-                            if response.clicked() {
-                                action = Some(TabAction::Activate(i));
+                                .on_hover_text(tr(lang, "Close"));
+                            if close.clicked() {
+                                action = Some(TabAction::Close(i));
                             }
-                            if labels.len() > 1 {
-                                let close = ui
-                                    .add(egui::Button::new("×").small().frame(false))
-                                    .on_hover_text(tr(lang, "Close"));
-                                if close.clicked() {
-                                    action = Some(TabAction::Close(i));
-                                }
-                            }
-                            ui.add_space(2.0);
                         }
-                        let new_tab_text = if new_tab_hint.is_empty() {
-                            tr(lang, "New tab").to_owned()
-                        } else {
-                            format!("{} ({new_tab_hint})", tr(lang, "New tab"))
-                        };
-                        if ui.button("+").on_hover_text(new_tab_text).clicked() {
-                            action = Some(TabAction::New);
+                        ui.add_space(2.0);
+                    }
+                    let new_tab_text = if new_tab_hint.is_empty() {
+                        tr(lang, "New tab").to_owned()
+                    } else {
+                        format!("{} ({new_tab_hint})", tr(lang, "New tab"))
+                    };
+                    if ui
+                        .add(egui::Button::new(
+                            egui::RichText::new("+").color(colors.inactive_fg),
+                        ))
+                        .on_hover_text(new_tab_text)
+                        .clicked()
+                    {
+                        action = Some(TabAction::New);
+                    }
+                    let find_text = if find_hint.is_empty() {
+                        tr(lang, "Find").to_owned()
+                    } else {
+                        format!("{} ({find_hint})", tr(lang, "Find"))
+                    };
+                    if ui
+                        .add(egui::Button::new(
+                            egui::RichText::new(tr(lang, "Find")).color(colors.inactive_fg),
+                        ))
+                        .on_hover_text(find_text)
+                        .clicked()
+                    {
+                        action = Some(TabAction::Find);
+                    }
+                };
+                // Estimate the strip width from the labels. When everything
+                // fits, the configured alignment applies; when it does not, a
+                // horizontal scroll area keeps every tab (and the close
+                // buttons) reachable instead of clipping them off-screen.
+                let estimated: f32 = labels
+                    .iter()
+                    .map(|label| truncate_label(label, 48).chars().count() as f32 * 8.0 + 40.0)
+                    .sum::<f32>()
+                    + 140.0;
+                if estimated > (width - 24.0).max(80.0) {
+                    egui::ScrollArea::horizontal()
+                        .id_salt("pretty-tabs-scroll")
+                        .auto_shrink([false, true])
+                        .scroll_bar_visibility(
+                            egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded,
+                        )
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| draw_tabs(ui));
+                        });
+                } else {
+                    // Centre/right align by offsetting the row; a manual offset
+                    // is more reliable than Layout::with_main_align inside the
+                    // tab-bar frame because the content is only as wide as its
+                    // widgets.
+                    let offset = match align {
+                        "center" => ((width - estimated) * 0.5).max(0.0),
+                        "right" => (width - estimated - 8.0).max(0.0),
+                        _ => 0.0,
+                    };
+                    ui.horizontal(|ui| {
+                        if offset > 0.0 {
+                            ui.add_space(offset);
                         }
-                        let find_text = if find_hint.is_empty() {
-                            tr(lang, "Find").to_owned()
-                        } else {
-                            format!("{} ({find_hint})", tr(lang, "Find"))
-                        };
-                        if ui
-                            .add(egui::Button::new(tr(lang, "Find")))
-                            .on_hover_text(find_text)
-                            .clicked()
-                        {
-                            action = Some(TabAction::Find);
-                        }
+                        draw_tabs(ui);
                     });
-                });
+                }
+            });
         });
     action
 }
@@ -3025,25 +3548,19 @@ fn cjk_face_index(path: &std::path::Path) -> u32 {
 fn install_ui_font(ctx: &egui::Context) {
     let started = Instant::now();
     // Fast path: loading every installed font through fontdb on every startup
-    // costs noticeable time. The common CJK fonts live at stable paths; only
-    // fall back to a full system scan if none of them exists.
-    let candidates = [
-        "/usr/share/fonts/google-noto-sans-cjk-vf-fonts/NotoSansCJK-VF.ttc",
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
-        "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
-        "/System/Library/Fonts/PingFang.ttc",
-        "C:\\Windows\\Fonts\\msyh.ttc",
-    ];
+    // costs noticeable time. The per-platform candidate list (Linux XDG font
+    // directories, macOS /System/Library/Fonts, Windows %WINDIR%\Fonts and
+    // Android /system/fonts) lives in platform/paths.rs; only a full system
+    // scan if none of them exists.
+    let paths = crate::platform::paths::Paths::host();
     let mut loaded: Option<(String, Vec<u8>, u32)> = None;
-    for path in candidates {
-        let p = std::path::Path::new(path);
-        if p.exists() {
-            if let Ok(bytes) = std::fs::read(p) {
-                loaded = Some((path.to_string(), bytes, cjk_face_index(p)));
-                break;
-            }
+    for path in paths.cjk_font_candidates() {
+        if !path.is_file() {
+            continue;
+        }
+        if let Ok(bytes) = std::fs::read(path) {
+            loaded = Some((path.display().to_string(), bytes, cjk_face_index(path)));
+            break;
         }
     }
     if loaded.is_none() {
@@ -3101,9 +3618,24 @@ mod tests {
 
     #[test]
     fn file_drop_quotes_spaces_and_quotes() {
-        assert_eq!(shell_quote_path("/tmp/a b.txt"), "'/tmp/a b.txt'");
-        assert_eq!(shell_quote_path("/tmp/it's.txt"), "'/tmp/it'\\''s.txt'");
-        assert_eq!(shell_quote_path("/tmp/plain"), "'/tmp/plain'");
+        assert_eq!(shell_quote_path("/tmp/a b.txt").as_deref(), Some("'/tmp/a b.txt'"));
+        assert_eq!(
+            shell_quote_path("/tmp/it's.txt").as_deref(),
+            Some("'/tmp/it'\\''s.txt'")
+        );
+        assert_eq!(shell_quote_path("/tmp/plain").as_deref(), Some("'/tmp/plain'"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_quoting_is_command_line_to_argv_safe() {
+        assert_eq!(shell_quote_path(r"C:\a b.txt").as_deref(), Some(r#""C:\a b.txt""#));
+        // A trailing backslash must be doubled before the closing quote.
+        assert_eq!(shell_quote_path(r"C:\dir\").as_deref(), Some(r#""C:\dir\\""#));
+        // Embedded quotes are backslash-doubled.
+        assert_eq!(shell_quote_path(r#"C:\a"b.txt"#).as_deref(), Some(r#""C:\a\"b.txt""#));
+        // cmd.exe variable expansion has no escape: refuse rather than inject.
+        assert_eq!(shell_quote_path(r"C:\%COMSPEC%.txt"), None);
     }
 
     #[test]
@@ -3178,5 +3710,134 @@ mod tests {
             Some("'/tmp/a.txt' '/tmp/b.txt' ")
         );
         assert_eq!(super::file_uris_to_shell_paths("ordinary text"), None);
+    }
+
+    #[test]
+    fn tab_title_templates_expand_placeholders() {
+        assert_eq!(super::expand_tab_title("{index}: {title}", 0, "bash", 3), "1: bash");
+        assert_eq!(
+            super::expand_tab_title("{title} ({index}/{count})", 2, "vim", 4),
+            "vim (3/4)"
+        );
+        // Unknown placeholders and unterminated braces stay visible instead of
+        // silently disappearing, which makes template typos debuggable.
+        assert_eq!(super::expand_tab_title("{unknown} {title}", 0, "x", 1), "{unknown} x");
+        assert_eq!(super::expand_tab_title("plain", 0, "x", 1), "plain");
+        assert_eq!(super::expand_tab_title("{title", 0, "x", 1), "{title");
+        assert_eq!(super::expand_tab_title("{title}}", 0, "x", 1), "x}");
+    }
+
+    #[test]
+    fn wheel_scrolling_respects_multiplier_and_minimum() {
+        use winit::event::MouseScrollDelta;
+        assert_eq!(
+            super::wheel_scroll_lines(MouseScrollDelta::LineDelta(0.0, 1.0), 3.0, 1),
+            3
+        );
+        assert_eq!(
+            super::wheel_scroll_lines(MouseScrollDelta::LineDelta(0.0, -1.0), 3.0, 2),
+            -3
+        );
+        // A tiny pixel delta still scrolls the configured minimum.
+        assert_eq!(
+            super::wheel_scroll_lines(
+                MouseScrollDelta::PixelDelta(winit::dpi::PhysicalPosition::new(0.0, 5.0)),
+                1.0,
+                3
+            ),
+            3
+        );
+        assert_eq!(
+            super::wheel_scroll_lines(
+                MouseScrollDelta::PixelDelta(winit::dpi::PhysicalPosition::new(0.0, 90.0)),
+                1.0,
+                1
+            ),
+            5
+        );
+        assert_eq!(
+            super::wheel_scroll_lines(MouseScrollDelta::LineDelta(0.0, 0.0), 3.0, 1),
+            0
+        );
+        // Nonsense multipliers fall back to the default instead of panicking.
+        assert_eq!(
+            super::wheel_scroll_lines(
+                MouseScrollDelta::LineDelta(0.0, 1.0),
+                f32::NAN,
+                1
+            ),
+            3
+        );
+    }
+
+    #[test]
+    fn blink_phase_starts_visible_and_toggles_at_the_deadline() {
+        use std::time::{Duration, Instant};
+        let interval = Duration::from_millis(530);
+        let mut phase = super::BlinkPhase::started(interval);
+        let start = phase.next - interval;
+        assert!(phase.on, "the cursor must be visible immediately after startup");
+        assert!(!phase.advance(start + Duration::from_millis(100), interval));
+        assert!(phase.on);
+        assert!(phase.advance(start + interval, interval));
+        assert!(!phase.on);
+        assert!(phase.advance(start + interval * 2, interval));
+        assert!(phase.on);
+    }
+
+    #[test]
+    fn blink_cadence_does_not_drift_when_ticks_arrive_late() {
+        use std::time::{Duration, Instant};
+        let interval = Duration::from_millis(530);
+        let mut phase = super::BlinkPhase::started(interval);
+        let start = phase.next - interval;
+        // A tick arrives 20 ms late: the next deadline stays on the original
+        // 530 ms grid instead of sliding to now + 530 ms.
+        assert!(phase.advance(start + interval + Duration::from_millis(20), interval));
+        assert_eq!(phase.next, start + interval * 2);
+    }
+
+    #[test]
+    fn late_toggle_cannot_create_a_tiny_phase() {
+        use std::time::{Duration, Instant};
+        let interval = Duration::from_millis(530);
+        let mut phase = super::BlinkPhase::started(interval);
+        let start = phase.next - interval;
+        // A frame arrives 300 ms after the deadline: the grid-corrected next
+        // deadline would be only 230 ms away, which used to cause a rapid
+        // second toggle (the visible flicker).
+        let now = start + interval + Duration::from_millis(300);
+        assert!(phase.advance(now, interval));
+        assert!(
+            phase.next >= now + interval / 2,
+            "phase must stay visible for at least half an interval, next={:?}",
+            phase.next - now
+        );
+    }
+
+    #[test]
+    fn blink_resynchronises_after_a_long_stall_without_bursting() {
+        use std::time::{Duration, Instant};
+        let interval = Duration::from_millis(530);
+        let mut phase = super::BlinkPhase::started(interval);
+        let start = phase.next - interval;
+        let late = start + Duration::from_secs(5);
+        assert!(phase.advance(late, interval));
+        // Exactly one toggle happened and the next one is a full interval out.
+        assert_eq!(phase.next, late + interval);
+        assert!(!phase.advance(late + Duration::from_millis(1), interval));
+    }
+
+    #[test]
+    fn blink_reset_shows_the_cursor_again() {
+        use std::time::{Duration, Instant};
+        let interval = Duration::from_millis(530);
+        let mut phase = super::BlinkPhase::started(interval);
+        let start = phase.next - interval;
+        assert!(phase.advance(start + interval, interval));
+        assert!(!phase.on);
+        phase.reset(interval);
+        assert!(phase.on);
+        assert!(phase.next > Instant::now());
     }
 }

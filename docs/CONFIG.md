@@ -17,14 +17,17 @@ immediately after a change still flushes the pending save.
 Missing keys always fall back to the built-in default, so an old or partially
 hand-written file keeps working after an upgrade. Invalid values are clamped
 (or replaced with the default) and logged; they never abort startup.
+**Settings → Reset all settings** (click twice within four seconds) restores
+every documented default through the same validation path.
 
 ## Graphical settings
 
 | Tab | Controls |
 |---|---|
-| General | language, font family/size/line height, ligatures, OpenType features, scrollback, shell, window width/height + **Apply window size**, **Import kitty.conf** |
-| Terminal | cursor shape/colour/blink interval, bell mode + visual-bell duration, copy-on-select, confirm-close, OSC 52 copy/paste policy |
-| Appearance | theme preset, 16-colour ANSI palette, opacity/blur/padding/tiling gap, terminal colours, UI accent/panel opacity/UI scale, tab-bar visibility/height |
+| General | language, font family/size/line height, ligatures, OpenType features, scrollback, shell, window width/height, remember-size, window decorations + **Apply window size**, **Import kitty.conf** |
+| Terminal | cursor shape/colour/opacity/text colour/blink interval, bell mode + visual-bell duration, wheel and scrollbar behaviour, pointer auto-hide, focus-follows-mouse, copy-on-select, confirm-close, OSC 52 copy/paste policy |
+| Appearance | theme preset, 16-colour ANSI palette, opacity/blur/padding/tiling gap, terminal colours, dim strength, pane borders, UI accent/panel opacity/UI scale |
+| Tab bar | edge, style, alignment, minimum tabs, height, title templates, tab-bar/active/inactive colours |
 | Rendering | backend selector, vsync, GPU/driver/surface/protocol diagnostics |
 | Keyboard | kitty keyboard flags and every configurable action binding |
 | About | version, config path, GPU, backend, documentation links |
@@ -44,11 +47,11 @@ rebinding or clearing an action is reflected there immediately.
 | `font_size` | `15.0` | 7–42 px |
 | `line_height` | `1.18` | 0.85–1.8 |
 | `ligatures` | `true` | programming ligatures (`liga`/`calt`) |
-| `font_features` | `["liga", "calt"]` | OpenType features passed to the shaper |
-| `scrollback` | `10000` | lines of history, capped at 200,000; changes apply to panes created afterwards |
+| `font_features` | `["liga", "calt"]` | OpenType features passed to the shaper (also in Settings → General); changes rebuild the font live |
+| `scrollback` | `10000` | lines of history, capped at 200,000. The slider applies **live** to every open pane; shrinking trims retained history immediately, growing applies to subsequent output |
 | `shell` | `$SHELL` / `cmd.exe` | program started in new panes |
-| `padding` | `10.0` | terminal padding in logical px, 0–40 |
-| `gap` | `5.0` | tiling gap between split panes, 0–20 |
+| `padding` | `10.0` | terminal padding in logical px, 0–40. `0` is a real value (edge-to-edge), not reset to the default |
+| `gap` | `5.0` | tiling gap between split panes, 0–20; `0` is allowed |
 
 **Font fallback** is automatic: the bundled JetBrains Mono families are primary,
 bundled Noto Emoji / Noto Color Emoji provide emoji, and missing characters are
@@ -111,9 +114,58 @@ later per-colour edits are stored alongside `theme` and win on the next load.
 | `ui_scale` | `1.0` | extra zoom for the tab bar, menus and settings panel; 0.6–2.5 (terminal cell size is unaffected) |
 | `ui_accent` | `"#7aa2f7"` | accent colour of the settings/context UI |
 | `ui_panel_opacity` | `1.0` | settings panel opacity, 0.5–1.0 |
+| `language` | `"auto"` | `auto`, `en`, `zh-CN` |
+
+### Tab bar
+
+Every key below is editable in **Settings → Appearance → Tab bar** and is
+imported from the matching kitty option when present.
+
+| Key | Default | Notes |
+|---|---|---|
 | `tab_bar_visible` | `true` | show/hide the tab bar; hide it for a kitty-like chrome-free window (`Ctrl+Shift+T`, the context menu and tab shortcuts still work) |
 | `tab_bar_height` | `30.0` | tab bar height in UI points, 18–64 |
-| `language` | `"auto"` | `auto`, `en`, `zh-CN` |
+| `tab_bar_edge` | `"top"` | `top` or `bottom` |
+| `tab_bar_style` | `"separator"` | `separator`, `fade` or `powerline` (kitty `slant` imports as `fade`) |
+| `tab_bar_align` | `"left"` | `left`, `center` or `right` |
+| `tab_bar_min_tabs` | `1` | hide the bar while fewer tabs are open (1–10) |
+| `tab_title_template` | `"{index}: {title}"` | label template; `{index}` is **1-based**, `{title}` is the focused pane title, `{count}` is the number of tabs. Unknown `{placeholders}` are kept verbatim |
+| `active_tab_title_template` | `""` | template for the active tab; empty uses `tab_title_template` |
+| `tab_bar_background` | `""` | tab bar background; empty derives it from the theme panel colour |
+| `active_tab_background` | `""` | active tab fill; empty follows the style (`powerline`: accent) |
+| `active_tab_foreground` | `""` | active tab text; empty follows the style |
+| `inactive_tab_background` | `""` | inactive tab fill; empty uses the panel colour |
+| `inactive_tab_foreground` | `""` | inactive tab text; empty is a dimmed foreground |
+
+Empty strings mean "automatic": the colour is derived from the active theme and
+the current tab-bar style, so switching theme presets keeps the bar coherent.
+The tab strip scrolls horizontally when the tabs do not fit, and the close
+buttons stay reachable on narrow windows.
+
+### Cursor details
+
+| Key | Default | Notes |
+|---|---|---|
+| `cursor_opacity` | `1.0` | block-cursor opacity, 0.0–1.0 (text under the block is never faded) |
+| `cursor_text_color` | `""` | text colour under a block cursor; empty uses the terminal background |
+
+### Pane chrome
+
+| Key | Default | Notes |
+|---|---|---|
+| `dim_opacity` | `0.5` | how strongly SGR-dim text is blended toward the background (0.1–1.0) |
+| `active_border_color` | `""` | focused pane border; empty uses the accent colour |
+| `inactive_border_color` | `""` | unfocused pane border; empty uses the theme border |
+
+### Scrolling and mouse
+
+| Key | Default | Notes |
+|---|---|---|
+| `wheel_scroll_multiplier` | `3.0` | lines per wheel notch, 0.1–10.0 |
+| `wheel_scroll_min_lines` | `1` | smallest scroll for a tiny pixel delta, 1–20 |
+| `scrollbar` | `"scrolled"` | `always`, `scrolled` (only while history is scrolled) or `never`; `auto` is accepted as `scrolled` |
+| `mouse_hide_wait` | `3.0` | seconds of pointer inactivity before the OS cursor is hidden; `0` never hides |
+| `focus_follows_mouse` | `false` | hovering a pane moves keyboard focus there (never while a button is held) |
 
 ### Cursor, bell and session behaviour
 
@@ -143,9 +195,12 @@ output; a red `bell = "none"` disables the behaviour entirely.
 |---|---|---|
 | `window_width` | `1280` | startup logical width, 320–7680 |
 | `window_height` | `820` | startup logical height, 200–4320 |
+| `remember_window_size` | `true` | persist the last non-maximised window size when Pretty exits |
+| `hide_window_decorations` | `false` | ask the compositor for an undecorated window (takes effect live where the platform allows it) |
 
-The settings panel stores the values and has an **Apply window size** button; a
-manual window resize is not written back to the config.
+The settings panel stores the values and has an **Apply window size** button.
+With `remember_window_size = true` the size of the last normal window is also
+written back on exit; maximised/fullscreen sizes are deliberately ignored.
 
 ### Shortcuts
 
@@ -208,11 +263,30 @@ Supported options:
 | `disable_ligatures` | `ligatures` (`never` → on, `always` → off) |
 | `shell` | `shell` |
 | `map <keys> <action>` | `[shortcuts]` entries for new/close/next/previous tab, find, copy, paste, select-all, zoom, quit, settings |
+| `tab_bar_edge`, `tab_bar_style`, `tab_bar_align`, `tab_bar_min_tabs` | same names (`slant` → `fade`) |
+| `tab_title_template`, `active_tab_title_template` | same names |
+| `tab_bar_background`, `active_tab_background/foreground`, `inactive_tab_background/foreground` | same names |
+| `cursor_opacity`, `cursor_text_color` | same names |
+| `active_border_color`, `inactive_border_color` | same names |
+| `wheel_scroll_multiplier`, `wheel_scroll_min_lines`, `scrollbar` | same names (`auto` → `scrolled`) |
+| `mouse_hide_wait`, `focus_follows_mouse` | same names |
+| `hide_window_decorations`, `remember_window_size` | same names (`hide_window_decorations title` is macOS-only in kitty and keeps decorations, with a warning) |
 | `include PATH` | recursive include, relative to the including file, `~` and `*` globs supported, cycle and depth checked |
 
-Everything else (for example `tab_bar_style`, `cursor_opacity`,
-`window_margin_width` or kitty-only actions such as `launch`) is listed as
-unsupported in the import report; the rest of the file is still applied.
+Everything else (for example `window_margin_width`, `background_image` or
+kitty-only actions such as `launch`) is listed as unsupported in the import
+report; the rest of the file is still applied. A `window_padding_width` with
+four values is accepted, using the first value for uniform padding with a
+documented warning.
+
+## Live application
+
+Colour, opacity, padding, line height, font features, cursor, tab-bar and
+scrollback changes take effect immediately on the running window. Font-size /
+font-family changes rebuild the glyph atlas (a few tens of milliseconds on the
+tested GPU); cell metrics for padding/line-height are recomputed without a
+rebuild. Only `renderer` and `vsync` require a restart, and the settings panel
+says so.
 
 ## Saving and reloading
 

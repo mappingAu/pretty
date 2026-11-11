@@ -15,13 +15,15 @@ clipboard integration and desktop notifications.
 
 | Area | State |
 |---|---|
-| Vulkan backend | **working**, tested on an NVIDIA GTX 1050 / driver 580.178.04 |
+| Vulkan backend | **working**, tested on an NVIDIA GTX 1050 / driver 580.196.07 (580.178.04 in the earlier 0.1.0 evidence) |
 | GLES backend | **working**, tested with a real OpenGL ES 3.2 NVIDIA context |
 | Metal backend (macOS) | **implemented** — `--features metal`; `auto` prefers Metal on macOS. Built by CI on `macos-latest`; the GUI was not run on physical Mac hardware in this release |
 | Direct3D 12 backend (Windows) | **implemented** — `--features dx`; `auto` prefers DX12 on Windows. Built by CI on `windows-latest`; the GUI was not run on physical Windows hardware in this release |
 | kitty graphics | PNG/RGB/RGBA, chunked transfer, placement, delete, query, z-index; animation/file/SHM are not implemented |
 | kitty keyboard | all five progressive-enhancement flags, query/push/pop, tested CSI-u output |
-| Tabs / find / shortcuts | tab bar, full-scrollback find, GUI-editable key bindings, theme presets and kitty.conf import |
+| Tabs / find / shortcuts | tab bar (top/bottom, separator/fade/powerline, alignment, minimum tabs, label templates, colours), full-scrollback find, GUI-editable key bindings, theme presets and kitty.conf import |
+| Configuration freedom | kitty-level tab bar/cursor/mouse/scroll settings, live scrollback, pane borders, dim strength, reset-to-defaults; 21+ new keys documented in docs/CONFIG.md |
+| Cursor blink | timer-thread driven + advanced on every presented frame, so rapid mouse input cannot starve it; verified with 60 fps capture |
 | IME | native Wayland text-input-v3; X11 XIM fallback; per-app Fcitx state is preserved |
 | Tiling, transparency, blur | working tiling panes; native KWin Wayland `ext_background_effect_v1` + X11 per-pixel ARGB alpha with real blur |
 | Packages | Flatpak, deb, rpm and relocatable tar.gz on Linux; portable Windows zip and macOS `.app`/tar.gz from CI with desktop entry, icon, man page and terminfo |
@@ -91,15 +93,22 @@ a GUI smoke test is not performed there (only `--version`/`--print-info`).
   background is rendered as per-pixel ARGB alpha, so KWin blurs the client
   buffer while terminal text stays fully opaque; no fake CPU blur and no
   whole-window opacity layer.
-- A customisable egui settings panel (Ctrl+, or the Settings button) covering
-  font, theme presets, the 16-colour ANSI palette, cursor shape/colour/blink,
-  bell behaviour, copy-on-select, confirm-close, OSC 52 policy, UI scale, tab
-  bar, window size, opacity/blur/padding, scrollback, tiling gap, vsync and
-  backend selection; it also has a **kitty.conf importer**. Only a restart is
-  required to change GPU backend. Every key is documented in
-  [docs/CONFIG.md](docs/CONFIG.md).
+- A customisable egui settings panel (Ctrl+, or the Settings button) with tabs
+  for General, Terminal, Appearance, **Tab bar**, Rendering, Keyboard and About,
+  covering font, theme presets, the 16-colour ANSI palette, cursor
+  shape/colour/opacity/text colour/blink, dim strength, pane borders, bell
+  behaviour, wheel/scrollbar, pointer hiding, focus-follows-mouse,
+  copy-on-select, confirm-close, OSC 52 policy, UI scale, tab bar (edge, style,
+  alignment, minimum tabs, templates, colours), window size, remember-size,
+  window decorations, opacity/blur/padding, scrollback, tiling gap, vsync and
+  backend selection. It also has a **kitty.conf importer** and a two-click
+  **Reset all settings**. Only a restart is required to change GPU backend.
+  Every key is documented in [docs/CONFIG.md](docs/CONFIG.md).
+- **HiDPI-correct UI.** Tab bar, settings, menus, context menu and IME cursor
+  are laid out in logical points and converted exactly once; verified at scale
+  factors 1.0/1.25/1.5/2.0 and with the extra `ui_scale` zoom.
 - Startup logs include requested/resolved backend, GPU, driver, surface format,
-  alpha mode, font and negotiated protocol level.
+  alpha mode, font and the compiled protocol-capability summary.
 
 ## UX notes
 
@@ -132,7 +141,14 @@ a GUI smoke test is not performed there (only `--version`/`--print-info`).
   X11/XWayland remains the fallback; GLES still uses XWayland on this driver.
 - Cursor blinking is controlled by `cursor_blink`; it intentionally overrides a
   terminal `DECSCUSR` steady style. The off phase draws a dim outline rather than
-  making the cursor vanish entirely.
+  making the cursor vanish entirely. A dedicated 16 ms timer thread (plus a
+  phase advance on every presented frame) keeps the blink cadence stable even
+  while the pointer is moving at high frequency — the previous
+  `ControlFlow::WaitUntil`-only path starved under a mouse flood and could
+  freeze the cursor in one phase.
+- `tab_title_template` supports `{index}` (1-based), `{title}` and `{count}`;
+  unknown placeholders are kept literally so typos are visible. The tab strip
+  scrolls horizontally when tabs do not fit.
 
 ## Flatpak
 
@@ -297,9 +313,32 @@ ui_panel_opacity = 1.0
 ui_scale = 1.0             # zoom tab bar, menus, settings (0.6-2.5)
 tab_bar_visible = true
 tab_bar_height = 30.0
+tab_bar_edge = "top"       # top | bottom
+tab_bar_style = "separator" # separator | fade | powerline
+tab_bar_align = "left"     # left | center | right
+tab_bar_min_tabs = 1
+tab_title_template = "{index}: {title}"
+active_tab_title_template = ""   # empty = same as inactive tabs
+tab_bar_background = ""    # empty = automatic theme colour
+active_tab_background = ""
+active_tab_foreground = ""
+inactive_tab_background = ""
+inactive_tab_foreground = ""
 cursor_blink = true
 cursor_blink_interval_ms = 530
+cursor_opacity = 1.0
+cursor_text_color = ""     # empty = terminal background
 cursor_shape = "block"     # block | beam | underline
+dim_opacity = 0.5
+active_border_color = ""   # empty = accent
+inactive_border_color = "" # empty = theme border
+wheel_scroll_multiplier = 3.0
+wheel_scroll_min_lines = 1
+scrollbar = "scrolled"     # always | scrolled | never
+mouse_hide_wait = 3.0      # 0 = never hide the pointer
+focus_follows_mouse = false
+remember_window_size = true
+hide_window_decorations = false
 bell = "attention"         # attention | visual | none
 visual_bell_duration_ms = 120
 copy_on_select = false
@@ -350,6 +389,7 @@ Every action in this table is configurable (or can be unbound) in
 ```bash
 cargo test --workspace
 scripts/test-hardware.sh      # needs a real KDE/X11 display, GPU, xdotool, xclip, vttest
+scripts/qa-v020.sh            # GUI-free QA: core suites, workspace tests, CLI smoke
 scripts/cross-check.sh        # Windows/macOS/Android compile checks + feature matrix
 ```
 
@@ -401,7 +441,10 @@ run (not to a GitHub release).
 - [Real-hardware test report](docs/TEST-REPORT.md)
 - [Packaging and install verification](docs/PACKAGING.md)
 - [Known issues](docs/KNOWN-ISSUES.md)
+- [Cross-platform status and prerequisites](docs/CROSS-PLATFORM.md)
 - [Cross-compile report](docs/CROSS-COMPILE.md)
+- [v0.2.0 QA and test report](docs/TEST-REPORT-V0.2.0.md)
+- [0.2.0 core/UX audit](docs/AUDIT-020.md)
 
 ## License
 

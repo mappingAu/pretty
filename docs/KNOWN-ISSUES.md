@@ -61,15 +61,23 @@ renderer or represent a compile-only stub as a supported platform.
    (`.github/workflows/build.yml`, unit-tested there). Local evidence is
    `cargo check` for the cross targets only, because this Linux host has no
    MinGW/Apple linker. Selecting a backend that was not compiled in, or that
-   belongs to another OS, fails with a clear typed error.
+   belongs to another OS, fails with a clear typed error. An invalid
+   `--renderer`/`PRETTY_RENDERER` value now exits non-zero with the valid list
+   instead of silently running `auto`; a bad `renderer` key in the config file
+   is still normalised to `auto` with a warning (a config typo must not make
+   the terminal unstartable).
 6. **No fallback rasterizer by default.** If no supported hardware adapter
    exists, Pretty exits with a diagnostic rather than starting a software
-   renderer. `--allow-software` is an explicit testing-only escape hatch used
-   solely for the Debian container smoke test on llvmpipe; it is not silent. A
+   renderer. `--allow-software` is an explicit testing-only escape hatch for
+   packaging/CI smoke tests and headless containers (for example llvmpipe/Xvfb
+   or the Windows WARP adapter); it logs a warning, is never enabled by
+   default, and is not used for any GPU-rendering claim in this repository. A
    normal launch never uses it.
 7. **Glyph atlas eviction is absent.** One 2048² R8 and one 1024² RGBA page are
-   used. A glyph that does not fit is skipped with a warning. Unusual sessions
-   with tens of thousands of unique glyph/style combinations can hit this.
+   used. A glyph that does not fit (or cannot be rasterized) is skipped, the
+   atlas-full condition is logged once, and the failed glyph is remembered so it
+   is not re-rasterized every frame. Unusual sessions with tens of thousands of
+   unique glyph/style combinations can still lose glyphs.
 8. **Kitty image caches are bounded, with an animation-specific policy.** The
    store caps the 256 newest images / 256 MiB of decoded pixels and removes old
    GPU textures every frame. Opaque RGB auto-id frames at the same anchor replace
@@ -89,10 +97,11 @@ renderer or represent a compile-only stub as a supported platform.
     (`o=z`), file-path transmission, shared-memory transmission, animation
     frames, unicode placeholders and image hyperlinks. These return explicit
     protocol errors where applicable.
-12. **Graphics placement is anchored to the viewport/cursor cell at command
-    time.** Scrolling and resizing reposition images using cell coordinates;
-    exact kitty semantics for images that scroll with historical lines are not
-    fully implemented.
+12. **Graphics placement is anchored to a content grid line at command time.**
+    The renderer adds the live scroll offset when drawing, so `display_offset`
+    is no longer baked into the anchor (fixed in 0.2.0). Scrolling and resizing
+    still reposition images using cell coordinates; exact kitty semantics for
+    images that scroll with historical lines are not fully implemented.
 13. **Mouse mode 1015 (urxvt) is not tracked.** X10, 1000, 1002, 1003, 1005 and
     1006 are implemented.
 14. **Kitty OSC 99 (rich notification) and pointer-shape protocol** are not
@@ -130,12 +139,53 @@ renderer or represent a compile-only stub as a supported platform.
 21. **Terminal emulation delegates core VT state to `alacritty_terminal`.** A few
     very old VT edge cases and proprietary sequences may behave differently from
     kitty; run `vttest` for the tested subset.
-22. **No config UI for all options.** Font family/size, colors, opacity, blur,
-    padding, gap, scrollback, shell, vsync, UI accent/opacity and backend are
-    graphical; some advanced fields remain file-only.
+22. **Some advanced fields remain file-only.** The settings UI now covers
+    font, colours, cursor opacity/text colour, dim strength, pane borders,
+    padding/gap, opacity/blur, scrollback (applied live), wheel/scrollbar,
+    pointer hiding, focus-follows-mouse, tab bar (edge/style/align/min tabs/
+    templates/colours), window decorations/remember-size, backend, vsync,
+    language, UI scale and every key binding. `font_features`, the raw
+    `[shortcuts]` table, `prefer_x11_for_blur` and a few legacy keys can still
+    be edited only in the file.
 23. **The `pretty` executable name can collide with existing commands named
     `pretty`.** The packaged application is `pretty-terminal` with binary
     `/usr/bin/pretty`; check your distribution before installing.
+
+## Configuration freedom and UI edges (0.2.0)
+
+29. **Tab title templates are deliberately simple.** `tab_title_template` /
+    `active_tab_title_template` support `{index}` (1-based), `{title}` and
+    `{count}`. Kitty's Python-style expressions, colour markup and
+    `{layout_name}`/`{num_windows}` are not interpreted; unknown placeholders
+    are kept verbatim. `tab_bar_style = "slant"` imports as `fade`.
+30. **Not every kitty option exists.** Cursor trails (`cursor_trail*`),
+    background images, `window_margin_width`, tab activity/bell markers and
+    arbitrary kitty actions are not implemented. The full supported list is in
+    `docs/CONFIG.md`.
+31. **Windows paths containing `%` are refused on drop/paste.** cmd.exe expands
+    `%VAR%` even inside double quotes and has no escape, so Pretty logs a
+    warning and does not insert the path rather than injecting an expansion
+    vector. Paths with spaces and quotes use CommandLineToArgvW-style quoting.
+32. **DPI coverage.** The UI is verified on this host's X11/XWayland path at
+    scale factors 1.0, 1.25, 1.5 and 2.0 and with `ui_scale` 1.0/1.5
+    (screenshots in `test-artifacts/ui-v020/`): settings fits the window, the
+    tab bar/content measure in logical points, and IME/context-menu positions
+    convert between physical pixels and points. Native Wayland fractional
+    scaling, per-monitor mixed DPI and Windows/macOS display scaling were not
+    exercised on physical hardware.
+33. **Cursor blink timing under extreme input floods.** The blink phase is
+    advanced from a 16 ms timer thread and from every presented frame, so it no
+    longer starves when pointer events keep the loop away from
+    `about_to_wait` (verified with a 60 fps screen capture during a synthetic
+    mouse flood). Resolution is still one 16 ms tick, not a hardware timer.
+34. **`focus_follows_mouse` never moves focus while a button is held**, and it
+    only applies to panes of the active tab. This is intentional (selection and
+    drags must not be interrupted).
+35. **`hide_window_decorations` is compositor-dependent**. X11/KWin honours it
+    live; some Wayland compositors ignore decoration requests from clients.
+36. **`mouse_hide_wait` hides the OS pointer after inactivity.** A compositor or
+    accessibility tool may override pointer visibility; moving or clicking
+    always restores it.
 
 ## Test/host limitations
 

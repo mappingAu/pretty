@@ -54,6 +54,10 @@ pub struct Config {
     pub allow_osc52_copy: bool,
     pub window_width: u32,
     pub window_height: u32,
+    /// Let the compositor draw window decorations; `false` = borderless window.
+    pub hide_window_decorations: bool,
+    /// Persist the last window size when Pretty exits.
+    pub remember_window_size: bool,
     // ---- UI look and feel ----
     /// Additional egui zoom factor for the tab bar, menu and settings panel.
     pub ui_scale: f32,
@@ -62,10 +66,32 @@ pub struct Config {
     pub theme: String,
     pub tab_bar_visible: bool,
     pub tab_bar_height: f32,
+    /// Which edge the tab bar sits on: `top` or `bottom`.
+    pub tab_bar_edge: String,
+    /// Tab bar rendering style: `separator`, `fade` or `powerline`.
+    pub tab_bar_style: String,
+    /// Horizontal alignment of the tab strip: `left`, `center` or `right`.
+    pub tab_bar_align: String,
+    /// Hide the tab bar while fewer than this many tabs are open.
+    pub tab_bar_min_tabs: usize,
+    /// Inactive tab label template; supports `{index}`, `{title}` and `{count}`.
+    pub tab_title_template: String,
+    /// Active tab label template; empty falls back to `tab_title_template`.
+    pub active_tab_title_template: String,
+    /// Optional tab-bar colours; empty strings derive them from the theme.
+    pub tab_bar_background: String,
+    pub active_tab_background: String,
+    pub active_tab_foreground: String,
+    pub inactive_tab_background: String,
+    pub inactive_tab_foreground: String,
     pub language: String,
     // ---- cursor / bell / session behaviour ----
     pub cursor_blink: bool,
     pub cursor_blink_interval_ms: u32,
+    /// Cursor opacity, 0.0-1.0 (kitty `cursor_opacity`).
+    pub cursor_opacity: f32,
+    /// Text colour under a block cursor; empty uses the terminal background.
+    pub cursor_text_color: String,
     /// Default cursor shape: `block`, `beam` or `underline` (DECSCUSR can still
     /// override it at runtime).
     pub cursor_shape: String,
@@ -73,10 +99,28 @@ pub struct Config {
     /// flash) or `none`.
     pub bell: String,
     pub visual_bell_duration_ms: u32,
+    /// How strongly dim text is faded toward the background (kitty `dim_opacity`).
+    pub dim_opacity: f32,
+    /// Focused pane border colour; empty derives it from the accent colour.
+    pub active_border_color: String,
+    /// Unfocused pane border colour; empty derives it from the theme border.
+    pub inactive_border_color: String,
     /// Copy the primary selection to the clipboard when a mouse selection ends.
     pub copy_on_select: bool,
     /// Ask for confirmation before closing the window or quitting.
     pub confirm_close: bool,
+    /// Lines scrolled per wheel notch (kitty `wheel_scroll_multiplier`).
+    pub wheel_scroll_multiplier: f32,
+    /// Smallest wheel delta in lines (kitty `wheel_scroll_min_lines`).
+    pub wheel_scroll_min_lines: i32,
+    /// Scrollbar visibility: `always`, `scrolled` or `never`.
+    pub scrollbar: String,
+    /// Hide the mouse pointer after this many seconds without mouse input
+    /// (kitty `mouse_hide_wait`; 0 disables hiding).
+    pub mouse_hide_wait: f32,
+    /// Move keyboard focus to the pane under the pointer (kitty
+    /// `focus_follows_mouse`).
+    pub focus_follows_mouse: bool,
     pub prefer_x11_for_blur: bool,
     /// Action name -> key binding, e.g. `new_tab = "Ctrl+Shift+T"`.
     pub shortcuts: HashMap<String, String>,
@@ -109,20 +153,43 @@ impl Default for Config {
             allow_osc52_copy: true,
             window_width: 1280,
             window_height: 820,
+            hide_window_decorations: false,
+            remember_window_size: true,
             ui_scale: 1.0,
             ui_accent: "#7aa2f7".into(),
             ui_panel_opacity: 1.0,
             theme: "pretty".into(),
             tab_bar_visible: true,
             tab_bar_height: 30.0,
+            tab_bar_edge: "top".into(),
+            tab_bar_style: "separator".into(),
+            tab_bar_align: "left".into(),
+            tab_bar_min_tabs: 1,
+            tab_title_template: "{index}: {title}".into(),
+            active_tab_title_template: String::new(),
+            tab_bar_background: String::new(),
+            active_tab_background: String::new(),
+            active_tab_foreground: String::new(),
+            inactive_tab_background: String::new(),
+            inactive_tab_foreground: String::new(),
             language: "auto".into(),
             cursor_blink: true,
             cursor_blink_interval_ms: 530,
+            cursor_opacity: 1.0,
+            cursor_text_color: String::new(),
             cursor_shape: "block".into(),
             bell: "attention".into(),
             visual_bell_duration_ms: 120,
+            dim_opacity: 0.5,
+            active_border_color: String::new(),
+            inactive_border_color: String::new(),
             copy_on_select: false,
             confirm_close: false,
+            wheel_scroll_multiplier: 3.0,
+            wheel_scroll_min_lines: 1,
+            scrollbar: "scrolled".into(),
+            mouse_hide_wait: 3.0,
+            focus_follows_mouse: false,
             prefer_x11_for_blur: false,
             shortcuts: default_shortcuts(),
         }
@@ -367,6 +434,12 @@ impl Config {
         t.padding = self.padding.clamp(0.0, 40.0);
         t.gap = self.gap.clamp(0.0, 20.0);
         t.cursor_blink = self.cursor_blink;
+        t.cursor_opacity = self.cursor_opacity.clamp(0.0, 1.0);
+        t.cursor_text = Rgb::parse_hex(&self.cursor_text_color);
+        t.dim_opacity = self.dim_opacity.clamp(0.0, 1.0);
+        t.active_border = Rgb::parse_hex(&self.active_border_color);
+        t.inactive_border = Rgb::parse_hex(&self.inactive_border_color);
+        t.scrollbar = pretty_renderer::theme::ScrollbarMode::from_config(&self.scrollbar);
         t
     }
 
@@ -378,8 +451,14 @@ impl Config {
         sane_f32(&mut self.font_size, 15.0);
         sane_f32(&mut self.line_height, 1.18);
         sane_f32(&mut self.opacity, 0.9);
-        sane_f32(&mut self.padding, 10.0);
-        sane_f32(&mut self.gap, 5.0);
+        // Zero padding/gap is a valid, commonly requested edge-to-edge layout;
+        // the old >0 helper silently replaced 0.0 with the default.
+        if !self.padding.is_finite() || self.padding < 0.0 {
+            self.padding = 10.0;
+        }
+        if !self.gap.is_finite() || self.gap < 0.0 {
+            self.gap = 5.0;
+        }
         sane_f32(&mut self.ui_panel_opacity, 1.0);
         sane_f32(&mut self.ui_scale, 1.0);
         sane_f32(&mut self.tab_bar_height, 30.0);
@@ -398,6 +477,66 @@ impl Config {
         self.tab_bar_height = self.tab_bar_height.clamp(18.0, 64.0);
         self.cursor_blink_interval_ms = self.cursor_blink_interval_ms.clamp(100, 2_000);
         self.visual_bell_duration_ms = self.visual_bell_duration_ms.clamp(20, 2_000);
+        self.cursor_opacity = if self.cursor_opacity.is_finite() {
+            self.cursor_opacity.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        self.dim_opacity = if self.dim_opacity.is_finite() {
+            self.dim_opacity.clamp(0.0, 1.0)
+        } else {
+            0.5
+        };
+        self.wheel_scroll_multiplier = if self.wheel_scroll_multiplier.is_finite() {
+            self.wheel_scroll_multiplier.clamp(0.1, 10.0)
+        } else {
+            3.0
+        };
+        self.wheel_scroll_min_lines = self.wheel_scroll_min_lines.clamp(1, 20);
+        self.mouse_hide_wait = if self.mouse_hide_wait.is_finite() {
+            self.mouse_hide_wait.clamp(0.0, 60.0)
+        } else {
+            3.0
+        };
+        self.tab_bar_min_tabs = self.tab_bar_min_tabs.clamp(0, 10);
+        if self.tab_title_template.chars().count() > 200 {
+            log::warn!("tab_title_template is longer than 200 characters; truncating");
+            self.tab_title_template = self.tab_title_template.chars().take(200).collect();
+        }
+        if self.active_tab_title_template.chars().count() > 200 {
+            log::warn!("active_tab_title_template is longer than 200 characters; truncating");
+            self.active_tab_title_template =
+                self.active_tab_title_template.chars().take(200).collect();
+        }
+        match self.tab_bar_edge.as_str() {
+            "top" | "bottom" => {}
+            other => {
+                log::warn!("unsupported tab_bar_edge '{other}'; using top");
+                self.tab_bar_edge = "top".into();
+            }
+        }
+        match self.tab_bar_style.as_str() {
+            "separator" | "fade" | "powerline" => {}
+            other => {
+                log::warn!("unsupported tab_bar_style '{other}'; using separator");
+                self.tab_bar_style = "separator".into();
+            }
+        }
+        match self.tab_bar_align.as_str() {
+            "left" | "center" | "right" => {}
+            other => {
+                log::warn!("unsupported tab_bar_align '{other}'; using left");
+                self.tab_bar_align = "left".into();
+            }
+        }
+        match self.scrollbar.as_str() {
+            "always" | "scrolled" | "never" => {}
+            "auto" => self.scrollbar = "scrolled".into(),
+            other => {
+                log::warn!("unsupported scrollbar '{other}'; using scrolled");
+                self.scrollbar = "scrolled".into();
+            }
+        }
         match self.cursor_shape.as_str() {
             "block" | "beam" | "underline" => {}
             other => {
@@ -456,8 +595,17 @@ impl Config {
             ("selection_bg", &self.selection_bg),
             ("selection_fg", &self.selection_fg),
             ("ui_accent", &self.ui_accent),
+            ("cursor_text_color", &self.cursor_text_color),
+            ("active_border_color", &self.active_border_color),
+            ("inactive_border_color", &self.inactive_border_color),
+            ("tab_bar_background", &self.tab_bar_background),
+            ("active_tab_background", &self.active_tab_background),
+            ("active_tab_foreground", &self.active_tab_foreground),
+            ("inactive_tab_background", &self.inactive_tab_background),
+            ("inactive_tab_foreground", &self.inactive_tab_foreground),
         ] {
-            if Rgb::parse_hex(value).is_none() {
+            // Empty optional colours mean "derive from the theme".
+            if !value.is_empty() && Rgb::parse_hex(value).is_none() {
                 log::warn!("invalid {name} colour '{value}'; using default");
             }
         }
@@ -506,11 +654,12 @@ pub fn config_path(explicit: Option<&Path>) -> PathBuf {
             return PathBuf::from(path);
         }
     }
-    if let Some(proj) = directories::ProjectDirs::from("org", "pretty", "pretty") {
-        proj.config_dir().join("config.toml")
-    } else {
-        PathBuf::from("pretty.toml")
+    // XDG on Linux, %APPDATA% on Windows, Application Support on macOS and
+    // the activity data directory on Android (see platform/paths.rs).
+    if let Some(path) = crate::platform::paths::Paths::host().config_file() {
+        return path;
     }
+    PathBuf::from("pretty.toml")
 }
 
 pub fn load(path: &Path) -> Config {
@@ -846,6 +995,168 @@ fn apply_kitty_option(
             config.shell = value.to_owned();
             report.applied += 1;
         }
+        // ---- kitty window/tab-bar/cursor/scroll extensions ----
+        "tab_bar_edge" => match value.to_ascii_lowercase().as_str() {
+            "top" | "bottom" => {
+                config.tab_bar_edge = value.to_ascii_lowercase();
+                report.applied += 1;
+            }
+            other => report.warn(format!("tab_bar_edge: unsupported edge '{other}'")),
+        },
+        "tab_bar_style" => match value.to_ascii_lowercase().as_str() {
+            "separator" | "powerline" => {
+                config.tab_bar_style = value.to_ascii_lowercase();
+                report.applied += 1;
+            }
+            "fade" | "slant" => {
+                // Pretty has no slant cut-outs; fade is the closest style.
+                config.tab_bar_style = "fade".into();
+                report.applied += 1;
+                if value.eq_ignore_ascii_case("slant") {
+                    report.warn("tab_bar_style: 'slant' mapped to 'fade'");
+                }
+            }
+            other => report.warn(format!("tab_bar_style: unsupported style '{other}'")),
+        },
+        "tab_bar_align" => match value.to_ascii_lowercase().as_str() {
+            "left" | "center" | "right" => {
+                config.tab_bar_align = value.to_ascii_lowercase();
+                report.applied += 1;
+            }
+            other => report.warn(format!("tab_bar_align: unsupported alignment '{other}'")),
+        },
+        "tab_bar_min_tabs" => match value.parse::<usize>() {
+            Ok(count) => {
+                config.tab_bar_min_tabs = count;
+                report.applied += 1;
+            }
+            Err(_) => report.warn(format!("tab_bar_min_tabs: '{value}' is not an integer")),
+        },
+        "tab_title_template" => {
+            config.tab_title_template = value.to_owned();
+            report.applied += 1;
+        }
+        "active_tab_title_template" => {
+            config.active_tab_title_template = value.to_owned();
+            report.applied += 1;
+        }
+        "tab_bar_background" => {
+            set_kitty_color(config, report, "tab_bar_background", value, |c, v| {
+                c.tab_bar_background = v
+            });
+        }
+        "active_tab_background" => {
+            set_kitty_color(config, report, "active_tab_background", value, |c, v| {
+                c.active_tab_background = v
+            });
+        }
+        "active_tab_foreground" => {
+            set_kitty_color(config, report, "active_tab_foreground", value, |c, v| {
+                c.active_tab_foreground = v
+            });
+        }
+        "inactive_tab_background" => {
+            set_kitty_color(config, report, "inactive_tab_background", value, |c, v| {
+                c.inactive_tab_background = v
+            });
+        }
+        "inactive_tab_foreground" => {
+            set_kitty_color(config, report, "inactive_tab_foreground", value, |c, v| {
+                c.inactive_tab_foreground = v
+            });
+        }
+        "cursor_opacity" => match value.parse::<f32>() {
+            Ok(opacity) => {
+                config.cursor_opacity = opacity;
+                report.applied += 1;
+            }
+            Err(_) => report.warn(format!("cursor_opacity: '{value}' is not a number")),
+        },
+        "cursor_text_color" => {
+            set_kitty_color(config, report, "cursor_text_color", value, |c, v| {
+                c.cursor_text_color = v
+            });
+        }
+        "active_border_color" => {
+            set_kitty_color(config, report, "active_border_color", value, |c, v| {
+                c.active_border_color = v
+            });
+        }
+        "inactive_border_color" => {
+            set_kitty_color(config, report, "inactive_border_color", value, |c, v| {
+                c.inactive_border_color = v
+            });
+        }
+        "wheel_scroll_multiplier" => match value.parse::<f32>() {
+            Ok(multiplier) => {
+                config.wheel_scroll_multiplier = multiplier;
+                report.applied += 1;
+            }
+            Err(_) => report.warn(format!(
+                "wheel_scroll_multiplier: '{value}' is not a number"
+            )),
+        },
+        "wheel_scroll_min_lines" => match value.parse::<i32>() {
+            Ok(lines) => {
+                config.wheel_scroll_min_lines = lines;
+                report.applied += 1;
+            }
+            Err(_) => report.warn(format!(
+                "wheel_scroll_min_lines: '{value}' is not an integer"
+            )),
+        },
+        "scrollbar" => match value.to_ascii_lowercase().as_str() {
+            "always" | "never" => {
+                config.scrollbar = value.to_ascii_lowercase();
+                report.applied += 1;
+            }
+            "scrolled" | "auto" => {
+                config.scrollbar = "scrolled".into();
+                report.applied += 1;
+            }
+            other => report.warn(format!("scrollbar: unsupported mode '{other}'")),
+        },
+        "mouse_hide_wait" => match value.parse::<f32>() {
+            Ok(seconds) => {
+                config.mouse_hide_wait = seconds;
+                report.applied += 1;
+            }
+            Err(_) => report.warn(format!("mouse_hide_wait: '{value}' is not a number")),
+        },
+        "focus_follows_mouse" => match kitty_bool(value) {
+            Some(enabled) => {
+                config.focus_follows_mouse = enabled;
+                report.applied += 1;
+            }
+            None => report.warn(format!("focus_follows_mouse: '{value}' is not a boolean")),
+        },
+        "hide_window_decorations" => match value.to_ascii_lowercase().as_str() {
+            "yes" | "true" | "1" => {
+                config.hide_window_decorations = true;
+                report.applied += 1;
+            }
+            "no" | "false" | "0" => {
+                config.hide_window_decorations = false;
+                report.applied += 1;
+            }
+            "title" | "title-and-bottom" => {
+                config.hide_window_decorations = false;
+                report.applied += 1;
+                report.warn(format!(
+                    "hide_window_decorations: '{value}' is macOS-only in kitty; decorations kept"
+                ));
+            }
+            other => report.warn(format!(
+                "hide_window_decorations: unsupported value '{other}'"
+            )),
+        },
+        "remember_window_size" => match kitty_bool(value) {
+            Some(enabled) => {
+                config.remember_window_size = enabled;
+                report.applied += 1;
+            }
+            None => report.warn(format!("remember_window_size: '{value}' is not a boolean")),
+        },
         "map" => {
             apply_kitty_map(value, config, report);
         }
@@ -1097,6 +1408,133 @@ mod tests {
     }
 
     #[test]
+    fn zero_padding_and_gap_survive_validation() {
+        // Regression: the >0 finite check used to turn an intentional
+        // edge-to-edge layout (padding = gap = 0) back into the defaults.
+        let mut config = Config::default();
+        config.padding = 0.0;
+        config.gap = 0.0;
+        config.validate();
+        assert_eq!(config.padding, 0.0);
+        assert_eq!(config.gap, 0.0);
+        config.padding = -3.0;
+        config.gap = f32::NAN;
+        config.validate();
+        assert_eq!(config.padding, 10.0);
+        assert_eq!(config.gap, 5.0);
+    }
+
+    #[test]
+    fn validate_normalizes_tab_bar_cursor_and_mouse_fields() {
+        let mut config = Config::default();
+        config.tab_bar_edge = "sideways".into();
+        config.tab_bar_style = "sparkles".into();
+        config.tab_bar_align = "diagonal".into();
+        config.tab_bar_min_tabs = 99;
+        config.cursor_opacity = 2.0;
+        config.dim_opacity = f32::NAN;
+        config.wheel_scroll_multiplier = 0.0;
+        config.wheel_scroll_min_lines = 0;
+        config.mouse_hide_wait = 999.0;
+        config.scrollbar = "sometimes".into();
+        config.validate();
+        assert_eq!(config.tab_bar_edge, "top");
+        assert_eq!(config.tab_bar_style, "separator");
+        assert_eq!(config.tab_bar_align, "left");
+        assert_eq!(config.tab_bar_min_tabs, 10);
+        assert_eq!(config.cursor_opacity, 1.0);
+        assert_eq!(config.dim_opacity, 0.5);
+        assert_eq!(config.wheel_scroll_multiplier, 0.1);
+        assert_eq!(config.wheel_scroll_min_lines, 1);
+        assert_eq!(config.mouse_hide_wait, 60.0);
+        assert_eq!(config.scrollbar, "scrolled");
+    }
+
+    #[test]
+    fn theme_carries_cursor_border_and_scrollbar_settings() {
+        let mut config = Config::default();
+        config.cursor_opacity = 0.4;
+        config.cursor_text_color = "#112233".into();
+        config.dim_opacity = 0.7;
+        config.active_border_color = "#ff0000".into();
+        config.inactive_border_color = "#00ff00".into();
+        config.scrollbar = "never".into();
+        let theme = config.theme();
+        assert_eq!(theme.cursor_opacity, 0.4);
+        assert_eq!(
+            theme.cursor_text,
+            Some(Rgb::new(0x11, 0x22, 0x33)),
+            "cursor_text_color must reach the renderer"
+        );
+        assert_eq!(theme.dim_opacity, 0.7);
+        assert_eq!(theme.active_border, Some(Rgb::new(0xff, 0, 0)));
+        assert_eq!(theme.inactive_border, Some(Rgb::new(0, 0xff, 0)));
+        assert_eq!(theme.scrollbar, pretty_renderer::theme::ScrollbarMode::Never);
+        // Empty optional colours mean "derive from the theme".
+        let theme = Config::default().theme();
+        assert_eq!(theme.cursor_text, None);
+        assert_eq!(theme.active_border, None);
+    }
+
+    #[test]
+    fn kitty_import_maps_tab_bar_cursor_and_mouse_extensions() {
+        let dir = unique_temp("kitty-ext");
+        let path = dir.join("kitty.conf");
+        std::fs::write(
+            &path,
+            "tab_bar_edge bottom\n\
+             tab_bar_style powerline\n\
+             tab_bar_align center\n\
+             tab_bar_min_tabs 2\n\
+             tab_title_template '{index} | {title}'\n\
+             active_tab_title_template '{index}* {title}'\n\
+             tab_bar_background #101010\n\
+             active_tab_background #202020\n\
+             active_tab_foreground #f0f0f0\n\
+             inactive_tab_background #303030\n\
+             inactive_tab_foreground #a0a0a0\n\
+             cursor_opacity 0.6\n\
+             cursor_text_color #112233\n\
+             active_border_color #ff0000\n\
+             inactive_border_color #333333\n\
+             wheel_scroll_multiplier 2.5\n\
+             wheel_scroll_min_lines 2\n\
+             scrollbar always\n\
+             mouse_hide_wait 1.5\n\
+             focus_follows_mouse yes\n\
+             hide_window_decorations yes\n\
+             remember_window_size no\n",
+        )
+        .unwrap();
+        let mut config = Config::default();
+        let report = import_kitty_conf(&path, &mut config).unwrap();
+        assert_eq!(config.tab_bar_edge, "bottom");
+        assert_eq!(config.tab_bar_style, "powerline");
+        assert_eq!(config.tab_bar_align, "center");
+        assert_eq!(config.tab_bar_min_tabs, 2);
+        assert_eq!(config.tab_title_template, "{index} | {title}");
+        assert_eq!(config.active_tab_title_template, "{index}* {title}");
+        assert_eq!(config.tab_bar_background, "#101010");
+        assert_eq!(config.active_tab_background, "#202020");
+        assert_eq!(config.active_tab_foreground, "#f0f0f0");
+        assert_eq!(config.inactive_tab_background, "#303030");
+        assert_eq!(config.inactive_tab_foreground, "#a0a0a0");
+        assert_eq!(config.cursor_opacity, 0.6);
+        assert_eq!(config.cursor_text_color, "#112233");
+        assert_eq!(config.active_border_color, "#ff0000");
+        assert_eq!(config.inactive_border_color, "#333333");
+        assert_eq!(config.wheel_scroll_multiplier, 2.5);
+        assert_eq!(config.wheel_scroll_min_lines, 2);
+        assert_eq!(config.scrollbar, "always");
+        assert_eq!(config.mouse_hide_wait, 1.5);
+        assert!(config.focus_follows_mouse);
+        assert!(config.hide_window_decorations);
+        assert!(!config.remember_window_size);
+        assert!(report.applied >= 20, "applied={} warnings={:?}", report.applied, report.warnings);
+        assert!(report.unsupported.is_empty(), "unexpected unsupported: {:?}", report.unsupported);
+    }
+
+    #[test]
     fn validate_clamps_new_fields_and_rejects_bad_enums() {
         let mut config = Config::default();
         config.ui_scale = f32::NAN;
@@ -1230,11 +1668,12 @@ mod tests {
         assert_eq!(config.shortcut("new_tab"), Some("Ctrl+Shift+T"));
         assert_eq!(config.shortcut("copy"), Some("Ctrl+Shift+C"));
         assert_eq!(config.shortcut("prev_tab"), Some("Alt+Left"));
-        assert!(report.unsupported.contains(&"tab_bar_style".to_owned()));
+        // tab_bar_style is supported now; window_margin_width is still not.
+        assert_eq!(config.tab_bar_style, "powerline");
+        assert!(!report.unsupported.contains(&"tab_bar_style".to_owned()));
         assert!(report
             .unsupported
             .contains(&"totally_unknown_option".to_owned()));
-        assert!(report.warnings.iter().any(|w| w.contains("tab_bar_style")));
         assert!(report.applied >= 18);
     }
 
