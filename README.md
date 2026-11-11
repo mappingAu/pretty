@@ -26,7 +26,7 @@ clipboard integration and desktop notifications.
 | Cursor blink | timer-thread driven + advanced on every presented frame, so rapid mouse input cannot starve it; verified with 60 fps capture |
 | IME | native Wayland text-input-v3; X11 XIM fallback; per-app Fcitx state is preserved |
 | Tiling, transparency, blur | working tiling panes; native KWin Wayland `ext_background_effect_v1` + X11 per-pixel ARGB alpha with real blur |
-| Packages | Flatpak, deb, rpm and relocatable tar.gz on Linux; portable Windows zip and macOS `.app`/tar.gz from CI with desktop entry, icon, man page and terminfo |
+| Packages | deb, rpm and relocatable tar.gz on Linux (built and hash-verified for this pre-release); portable Windows zip and macOS `.app`/tar.gz from CI with desktop entry, icon, man page and terminfo. The Flatpak script is maintained but was not rebuilt for this pre-release (no `flatpak-builder` on the build host) |
 | License | GPL-3.0-or-later; bundled fonts remain OFL-1.1 |
 
 See [docs/KITTY-COMPAT.md](docs/KITTY-COMPAT.md) for the item-by-item protocol
@@ -166,7 +166,8 @@ flatpak run io.github.mappingAu.Pretty
 The app uses `org.freedesktop.Platform//25.08`, Wayland/X11 fallback, DRIs,
 home access, network access and notifications. A Noto CJK face is bundled because the
 freedesktop runtime does not ship one. The Flatpak build is a packaging-only
-check for this iteration; it was not installed or launched.
+check; it was not installed or launched. It was **not rebuilt for the v0.2.0
+pre-release** because `flatpak-builder` is unavailable on the release host.
 
 ## Build
 
