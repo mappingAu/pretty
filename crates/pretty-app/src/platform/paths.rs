@@ -415,6 +415,10 @@ mod tests {
         move |key| map.get(key).cloned()
     }
 
+    // These assert the Linux/XDG layout with '/' separators. Windows PathBuf
+    // normalises separators, so the platform-parametrised resolver is covered
+    // there by the windows_* tests instead.
+    #[cfg(unix)]
     #[test]
     fn xdg_overrides_are_honoured() {
         let env = fake_env(&[
@@ -509,6 +513,7 @@ mod tests {
         assert!(paths.font_dirs.contains(&PathBuf::from("/usr/share/fonts")));
     }
 
+    #[cfg(unix)]
     #[test]
     fn xdg_data_dirs_control_font_search_order() {
         let env = fake_env(&[

@@ -3616,6 +3616,9 @@ fn install_ui_font(ctx: &egui::Context) {
 mod tests {
     use super::{shell_quote_path, Shortcut};
 
+    // POSIX single-quote quoting; Windows has its own CommandLineToArgvW
+    // test below and uses double quotes.
+    #[cfg(not(windows))]
     #[test]
     fn file_drop_quotes_spaces_and_quotes() {
         assert_eq!(shell_quote_path("/tmp/a b.txt").as_deref(), Some("'/tmp/a b.txt'"));
@@ -3699,6 +3702,7 @@ mod tests {
         assert!(!super::is_safe_hyperlink(""));
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn clipboard_file_uris_become_shell_paths() {
         assert_eq!(
