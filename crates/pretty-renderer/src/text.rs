@@ -6,7 +6,7 @@
 //! rustybuzz, preserving `liga`/`calt`; glyphs are rasterized through swash into
 //! R8 (mask) or RGBA (color) atlases.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use pretty_core::Frame;
@@ -70,10 +70,17 @@ pub struct FontManager {
     cell_width_cache: HashMap<usize, f32>,
     fallback_cache: HashMap<char, Option<usize>>,
     loaded_system: HashMap<String, Option<usize>>,
+    /// fontdb ID -> face index, so a fallback scan never copies the same
+    /// system font into memory twice (untrusted output can request thousands
+    /// of uncovered codepoints).
+    loaded_ids: HashMap<fontdb::ID, usize>,
+    /// fontdb IDs that could not be loaded; do not retry them per codepoint.
+    failed_ids: HashSet<fontdb::ID>,
     metrics: CellMetrics,
     font_size_px: f32,
     scale_factor: f32,
     features: Vec<rustybuzz::Feature>,
+    theme_features: Vec<String>,
     ligatures: bool,
 }
 
@@ -120,10 +127,13 @@ impl FontManager {
             cell_width_cache: HashMap::new(),
             fallback_cache: HashMap::new(),
             loaded_system: HashMap::new(),
+            loaded_ids: HashMap::new(),
+            failed_ids: HashSet::new(),
             metrics: CellMetrics::default(),
             font_size_px: 0.0,
             scale_factor,
             features: Vec::new(),
+            theme_features: theme.font_features.clone(),
             ligatures: theme.ligatures,
         };
         // Emoji fonts are bundled and take part in fallback. Color emoji first.
@@ -161,20 +171,31 @@ impl FontManager {
     }
 
     fn load_face_id(&mut self, id: fontdb::ID) -> Option<usize> {
-        let (data, index, family) = self.db.with_face_data(id, |data, index| {
+        if let Some(existing) = self.loaded_ids.get(&id) {
+            return Some(*existing);
+        }
+        if self.failed_ids.contains(&id) {
+            return None;
+        }
+        let Some((data, index, family)) = self.db.with_face_data(id, |data, index| {
             let family = self
                 .db
                 .face(id)
                 .and_then(|f| f.families.first().map(|(name, _)| name.clone()))
                 .unwrap_or_else(|| "System font".into());
             (data.to_vec(), index, family)
-        })?;
+        }) else {
+            self.failed_ids.insert(id);
+            return None;
+        };
         self.faces.push(FontFace {
             data: Arc::from(data.into_boxed_slice()),
             index,
             family,
         });
-        Some(self.faces.len() - 1)
+        let face_index = self.faces.len() - 1;
+        self.loaded_ids.insert(id, face_index);
+        Some(face_index)
     }
 
     pub fn metrics(&self) -> CellMetrics {
@@ -192,6 +213,7 @@ impl FontManager {
         self.scale_factor = scale_factor;
         self.font_size_px = (theme.font_size * scale_factor).max(4.0);
         self.ligatures = theme.ligatures;
+        self.theme_features = theme.font_features.clone();
         let face = self.faces.get(self.primary[0]).ok_or("missing primary font")?;
         let font = face.ref_swash().ok_or("failed to parse primary font")?;
         let m = font.metrics(&[]).scale(self.font_size_px);
@@ -238,10 +260,14 @@ impl FontManager {
                 break;
             }
         }
-        if result.is_none() {
+        // Cap the number of lazily loaded system faces. Without a cap a stream
+        // of uncovered codepoints (untrusted output) could copy hundreds of
+        // full system fonts into memory.
+        const MAX_FALLBACK_FACES: usize = 64;
+        if result.is_none() && self.faces.len() < MAX_FALLBACK_FACES {
             let ids: Vec<fontdb::ID> = self.db.faces().map(|f| f.id).collect();
             for id in ids {
-                if self.faces.len() > 512 {
+                if self.faces.len() >= MAX_FALLBACK_FACES {
                     break;
                 }
                 let Some(loaded) = self.load_face_id(id) else { continue };
@@ -257,6 +283,9 @@ impl FontManager {
         if is_emoji(c) && self.faces.len() > 4 && self.has_glyph(4, c) {
             result = Some(4);
         }
+        if self.fallback_cache.len() >= 8_192 {
+            self.fallback_cache.clear();
+        }
         self.fallback_cache.insert(c, result);
         result.unwrap_or(primary)
     }
@@ -271,6 +300,11 @@ impl FontManager {
             .and_then(|f| f.ref_swash())
             .map(|font| font.charmap().map(c) != 0)
             .unwrap_or(false);
+        // Bounded: terminal output is untrusted and may request an unlimited
+        // number of distinct codepoints.
+        if self.coverage.len() >= 32_768 {
+            self.coverage.clear();
+        }
         self.coverage.insert((face_idx, c), has);
         has
     }
@@ -579,6 +613,10 @@ pub struct TextRenderer {
     mono_atlas: Atlas,
     color_atlas: Atlas,
     glyph_cache: HashMap<(usize, u16), AtlasGlyph>,
+    /// Glyphs that cannot be rasterized or placed (too large, atlas full) so
+    /// they are not re-rasterized on every frame.
+    failed_glyphs: HashSet<(usize, u16)>,
+    atlas_full_warned: bool,
     mono_pipeline: wgpu::RenderPipeline,
     color_pipeline: wgpu::RenderPipeline,
     mono_buffer: wgpu::Buffer,
@@ -594,6 +632,9 @@ pub struct TextRenderer {
     theme_size: f32,
     theme_family: String,
     theme_ligatures: bool,
+    theme_features: Vec<String>,
+    theme_line_height: f32,
+    theme_padding: f32,
 }
 
 impl TextRenderer {
@@ -707,6 +748,8 @@ impl TextRenderer {
             mono_atlas,
             color_atlas,
             glyph_cache: HashMap::new(),
+            failed_glyphs: HashSet::new(),
+            atlas_full_warned: false,
             mono_pipeline,
             color_pipeline,
             mono_buffer,
@@ -722,6 +765,9 @@ impl TextRenderer {
             theme_size: theme.font_size,
             theme_family: theme.font_family.clone(),
             theme_ligatures: theme.ligatures,
+            theme_features: theme.font_features.clone(),
+            theme_line_height: theme.line_height,
+            theme_padding: theme.padding,
         })
     }
 
@@ -729,7 +775,38 @@ impl TextRenderer {
         (theme.font_size - self.theme_size).abs() > 0.01
             || theme.font_family != self.theme_family
             || theme.ligatures != self.theme_ligatures
+            || theme.font_features != self.theme_features
             || (scale_factor - self.scale_factor).abs() > 0.001
+    }
+
+    /// True when only cell metrics changed (padding / line height), which can
+    /// be applied without rebuilding the glyph atlases.
+    pub fn needs_metrics_update(&self, theme: &Theme, scale_factor: f32) -> bool {
+        (theme.line_height - self.theme_line_height).abs() > 0.001
+            || (theme.padding - self.theme_padding).abs() > 0.01
+            || (scale_factor - self.scale_factor).abs() > 0.001
+    }
+
+    /// Recompute cell metrics for a padding/line-height change. Glyph rasters
+    /// are size-independent here, so the atlases stay valid.
+    pub fn update_metrics(
+        &mut self,
+        theme: &Theme,
+        scale_factor: f32,
+        max_texture: u32,
+    ) -> Result<(), String> {
+        self.fonts.set_size(theme, scale_factor, max_texture)?;
+        self.metrics = self.fonts.metrics();
+        self.font_size_px = (theme.font_size * scale_factor).max(4.0);
+        self.scale_factor = scale_factor;
+        self.theme_size = theme.font_size;
+        self.theme_family = theme.font_family.clone();
+        self.theme_ligatures = theme.ligatures;
+        self.theme_features = theme.font_features.clone();
+        self.theme_line_height = theme.line_height;
+        self.theme_padding = theme.padding;
+        self.font_family = self.fonts.family_name();
+        Ok(())
     }
 
     pub fn rebuild(
@@ -755,11 +832,23 @@ impl TextRenderer {
         (&self.mono_atlas.bind_group, &self.color_atlas.bind_group)
     }
 
+    /// Remember an unrenderable glyph (bounded) so it is not retried every frame.
+    fn remember_failed(&mut self, key: (usize, u16)) {
+        if self.failed_glyphs.len() >= 8_192 {
+            self.failed_glyphs.clear();
+        }
+        self.failed_glyphs.insert(key);
+    }
+
     /// Rasterize a glyph (or fetch the cached atlas entry). R8 glyphs go to the
     /// mono atlas, RGBA color glyphs to the color atlas.
     fn glyph(&mut self, font_idx: usize, glyph_id: u16) -> Option<AtlasGlyph> {
-        if let Some(g) = self.glyph_cache.get(&(font_idx, glyph_id)) {
+        let key = (font_idx, glyph_id);
+        if let Some(g) = self.glyph_cache.get(&key) {
             return Some(g.clone());
+        }
+        if self.failed_glyphs.contains(&key) {
+            return None;
         }
         let data = Arc::clone(&self.fonts.faces.get(font_idx)?.data);
         let index = self.fonts.faces[font_idx].index as usize;
@@ -779,20 +868,32 @@ impl TextRenderer {
         let render = Render::new(&sources);
         let mut image = SwashImage::new();
         if !render.render_into(&mut scaler, glyph_id, &mut image) {
+            self.remember_failed(key);
             return None;
         }
         let w = image.placement.width;
         let h = image.placement.height;
         if w == 0 || h == 0 || image.data.is_empty() {
+            self.remember_failed(key);
             return None;
         }
         let is_color = image.content == Content::Color;
         let atlas = if is_color { &mut self.color_atlas } else { &mut self.mono_atlas };
         if atlas.width < w + 4 || atlas.height < h + 4 {
             log::warn!("glyph {glyph_id} too large for atlas ({w}x{h})");
+            self.remember_failed(key);
             return None;
         }
-        let (x, y) = atlas.alloc(w, h)?;
+        let Some((x, y)) = atlas.alloc(w, h) else {
+            if !self.atlas_full_warned {
+                log::warn!(
+                    "glyph atlas is full; some glyphs will not be rendered (reduce font size or unique glyph count)"
+                );
+                self.atlas_full_warned = true;
+            }
+            self.remember_failed(key);
+            return None;
+        };
         match image.content {
             Content::Mask => atlas.upload_r8(x, y, w, h, &image.data),
             Content::SubpixelMask => {

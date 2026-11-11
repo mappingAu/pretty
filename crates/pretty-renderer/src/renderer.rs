@@ -160,6 +160,19 @@ impl Renderer {
             }
         };
         self.theme = theme;
+        if !rebuild && self.text.needs_metrics_update(&self.theme.clone(), self.scale_factor) {
+            let t = self.theme.clone();
+            let max = self.gpu.adapter.limits().max_texture_dimension_2d;
+            self.text
+                .update_metrics(&t, self.scale_factor, max)
+                .map_err(RendererError::Font)?;
+            log::debug!(
+                "cell metrics updated: {}x{} padding={}",
+                self.text.metrics.cell_w,
+                self.text.metrics.cell_h,
+                self.text.metrics.padding
+            );
+        }
         if rebuild {
             let t = self.theme.clone();
             let format = self.gpu.config.format;
@@ -514,8 +527,8 @@ impl Renderer {
                     }
                 }
             }
-            // Scrollbar.
-            if pane.frame.history_size > 0 {
+            // Scrollbar (kitty `scrollbar` policy: always / scrolled / never).
+            if pane.frame.history_size > 0 && t.scrollbar.visible(pane.frame.display_offset) {
                 let track_x = pane.rect.x + pane.rect.w - 6.0;
                 let track_y = pane.rect.y + 4.0;
                 let track_h = (pane.rect.h - 8.0).max(1.0);
@@ -541,9 +554,11 @@ impl Renderer {
                 );
             }
             let border = if pane.focused {
-                linear(t.accent, 0.8)
+                t.active_border.map(|c| linear(c, 0.9)).unwrap_or_else(|| linear(t.accent, 0.8))
             } else {
-                linear(t.border, 0.5)
+                t.inactive_border
+                    .map(|c| linear(c, 0.6))
+                    .unwrap_or_else(|| linear(t.border, 0.5))
             };
             push_outline(&mut fg, pane.rect.inset(0.5), 1.0, border);
         }

@@ -2,6 +2,37 @@
 
 use pretty_core::{CellAttributes, ColorSpec, Rgb};
 
+/// Scrollbar visibility policy (kitty `scrollbar`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ScrollbarMode {
+    /// Always reserve and draw the scrollbar track.
+    Always,
+    /// Show the scrollbar only while history is scrolled (kitty default).
+    #[default]
+    Scrolled,
+    /// Never draw a scrollbar.
+    Never,
+}
+
+impl ScrollbarMode {
+    pub fn from_config(value: &str) -> Self {
+        match value {
+            "always" => Self::Always,
+            "never" => Self::Never,
+            _ => Self::Scrolled,
+        }
+    }
+
+    /// Whether the scrollbar should be drawn for the given scroll offset.
+    pub fn visible(self, display_offset: usize) -> bool {
+        match self {
+            Self::Always => true,
+            Self::Scrolled => display_offset > 0,
+            Self::Never => false,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Theme {
     pub background: Rgb,
@@ -22,6 +53,17 @@ pub struct Theme {
     pub padding: f32,
     pub gap: f32,
     pub cursor_blink: bool,
+    /// Cursor opacity (kitty `cursor_opacity`), 0.0-1.0.
+    pub cursor_opacity: f32,
+    /// Text colour under a block cursor; `None` uses the background colour.
+    pub cursor_text: Option<Rgb>,
+    /// How strongly dim text is faded toward the background (kitty `dim_opacity`).
+    pub dim_opacity: f32,
+    /// Border colour of the focused pane; `None` uses the neutral border.
+    pub active_border: Option<Rgb>,
+    /// Border colour of unfocused panes; `None` uses the neutral border.
+    pub inactive_border: Option<Rgb>,
+    pub scrollbar: ScrollbarMode,
 }
 
 impl Default for Theme {
@@ -62,6 +104,12 @@ impl Default for Theme {
             padding: 10.0,
             gap: 4.0,
             cursor_blink: true,
+            cursor_opacity: 1.0,
+            cursor_text: None,
+            dim_opacity: 0.5,
+            active_border: None,
+            inactive_border: None,
+            scrollbar: ScrollbarMode::Scrolled,
         }
     }
 }
@@ -104,7 +152,9 @@ impl Theme {
         is_cursor_block: bool,
         is_background: bool,
     ) -> [f32; 4] {
-        if attrs.hidden {
+        // Hidden text is transparent, but an explicit cell background must
+        // still be painted (SGR 8 only hides the glyph, not the cell).
+        if attrs.hidden && !is_background {
             return [0.0, 0.0, 0.0, 0.0];
         }
         let mut rgb = match spec {
@@ -120,19 +170,29 @@ impl Theme {
         if attrs.selected {
             rgb = if is_background { self.selection_bg } else { self.selection_fg };
         }
+        let mut cursor_alpha = 1.0;
         if is_cursor_block {
-            rgb = if is_background { self.cursor } else { self.background };
-        }
-        let mut alpha = if is_background { self.opacity } else { 1.0 };
-        if attrs.dim {
-            rgb = Rgb::new(
-                (rgb.r as f32 * 0.62) as u8,
-                (rgb.g as f32 * 0.62) as u8,
-                (rgb.b as f32 * 0.62) as u8,
-            );
-            if !is_background {
-                alpha *= 0.85;
+            rgb = if is_background {
+                self.cursor
+            } else {
+                self.cursor_text.unwrap_or(self.background)
+            };
+            if is_background {
+                // `cursor_opacity` fades the block itself, never the text.
+                cursor_alpha = self.cursor_opacity.clamp(0.0, 1.0);
             }
+        }
+        let mut alpha = if is_background { self.opacity } else { 1.0 } * cursor_alpha;
+        if attrs.dim {
+            // Blend toward the terminal background like kitty's dim_opacity
+            // instead of dropping alpha, which would leak the desktop through.
+            let f = self.dim_opacity.clamp(0.0, 1.0);
+            let mix = |c: u8, b: u8| (b as f32 + (c as f32 - b as f32) * f).round() as u8;
+            rgb = Rgb::new(
+                mix(rgb.r, self.background.r),
+                mix(rgb.g, self.background.g),
+                mix(rgb.b, self.background.b),
+            );
         }
         linear(rgb, alpha)
     }
