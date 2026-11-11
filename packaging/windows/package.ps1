@@ -61,7 +61,8 @@ try {
     Copy-Item -Path "packaging/windows/README-WINDOWS.txt" -Destination $Stage
     foreach ($doc in @(
             "README.md", "RENDERER.md", "ARCHITECTURE.md",
-            "CROSS-COMPILE.md", "PACKAGING.md", "KNOWN-ISSUES.md")) {
+            "CROSS-COMPILE.md", "CROSS-PLATFORM.md", "PACKAGING.md",
+            "KNOWN-ISSUES.md")) {
         $src = Join-Path "docs" $doc
         if (Test-Path $src) {
             Copy-Item -Path $src -Destination (Join-Path $Stage "docs")

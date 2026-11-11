@@ -13,7 +13,7 @@ pub mod renderer;
 pub mod text;
 pub mod theme;
 
-pub use backend::{driver_for, RendererKind};
+pub use backend::{driver_for, BackendError, RendererKind};
 pub use context::{probe_adapters, GpuInfo, RendererError};
 pub use renderer::{PaneDraw, RenderOutcome, Renderer, UiPaint};
 pub use text::CellMetrics;

@@ -45,5 +45,6 @@ Known limitations
 
 Docs and licence
 ----------------
-docs/README.md, docs/RENDERER.md, docs/CROSS-COMPILE.md, docs/KNOWN-ISSUES.md
+docs/README.md, docs/RENDERER.md, docs/CROSS-COMPILE.md,
+docs/CROSS-PLATFORM.md, docs/KNOWN-ISSUES.md
 LICENSE: GPL-3.0-or-later. Bundled fonts remain under the SIL OFL 1.1.

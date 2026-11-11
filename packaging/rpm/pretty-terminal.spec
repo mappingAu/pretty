@@ -52,6 +52,11 @@ tar -xzf %{SOURCE0} -C %{buildroot} --strip-components=1
 %{_docdir}/pretty/ARCHITECTURE.md
 %{_docdir}/pretty/KNOWN-ISSUES.md
 %{_docdir}/pretty/PACKAGING.md
+%{_docdir}/pretty/CONFIG.md
+%{_docdir}/pretty/CROSS-PLATFORM.md
+%{_docdir}/pretty/CROSS-COMPILE.md
+%{_docdir}/pretty/TEST-REPORT-V0.2.0.md
+%{_docdir}/pretty/AUDIT-020.md
 %{_docdir}/pretty/LICENSE
 %{_docdir}/pretty/copyright
 %{_docdir}/pretty/licenses

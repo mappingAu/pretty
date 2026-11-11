@@ -7,16 +7,29 @@ mod menu;
 mod platform;
 mod settings;
 
+// The Android entry point is `android_main` below, which needs winit's
+// NativeActivity glue (`winit/android-native-activity`). Without it the app
+// would build a desktop event loop that can never be attached to a surface.
+#[cfg(all(target_os = "android", not(feature = "android")))]
+compile_error!(
+    "Android builds require `--features android` (enables winit/android-native-activity)"
+);
+
+#[cfg(not(target_os = "android"))]
 use std::path::PathBuf;
+#[cfg(not(target_os = "android"))]
 use std::process::ExitCode;
 
-use pretty_renderer::{probe_adapters, RendererKind};
+#[cfg(not(target_os = "android"))]
+use pretty_renderer::probe_adapters;
+use pretty_renderer::RendererKind;
 use winit::event_loop::EventLoop;
 
 use crate::app::{AppOptions, PrettyApp, UserEvent};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+#[cfg(not(target_os = "android"))]
 #[derive(Debug, Default)]
 struct Cli {
     config: Option<PathBuf>,
@@ -35,6 +48,7 @@ struct Cli {
     version: bool,
 }
 
+#[cfg(not(target_os = "android"))]
 fn parse_args() -> Result<Cli, String> {
     let mut cli = Cli::default();
     let mut args = std::env::args().skip(1);
@@ -79,6 +93,7 @@ fn parse_args() -> Result<Cli, String> {
     Ok(cli)
 }
 
+#[cfg(not(target_os = "android"))]
 fn usage() -> &'static str {
     "Pretty — hardware accelerated kitty-compatible terminal\n\
 \n\
@@ -95,7 +110,9 @@ Options:\n\
   --fullscreen                             Start fullscreen\n\
   --title <TITLE>                          Initial window title\n\
   --print-info                             Print GPU/backend/protocol diagnostics and exit\n\
+  --import-kitty-conf <PATH>                Merge a kitty.conf into the Pretty config\n\
   --benchmark <FRAMES>                     Continuous full repaint benchmark, then exit\n\
+  --allow-software                         Testing only: permit a CPU/software adapter\n\
   --version                                Print version and exit\n\
   -h, --help                               Print this help\n\
 \n\
@@ -112,6 +129,7 @@ Shortcuts:\n\
 
 /// Make a relocatable tarball work even before `install.sh` has run: if
 /// `../share/terminfo` exists next to the binary, point children at it.
+#[cfg(not(target_os = "android"))]
 fn ensure_terminfo() {
     if std::env::var_os("TERMINFO").is_some() {
         return;
@@ -150,6 +168,7 @@ fn prepare_x11_ime() {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 fn print_info(config: &config::Config) {
     #[cfg(target_os = "linux")]
     std::env::set_var("PRETTY_GL_FORCE_GLES", "1");
@@ -194,6 +213,92 @@ fn print_info(config: &config::Config) {
     );
 }
 
+/// Android NativeActivity entry point.
+///
+/// `android-activity` loads the app as a shared library and calls this symbol
+/// from its Java/Kotlin glue; there is no `main` process. `cargo check` and
+/// `cargo build` still need a `main` for the bin target, so the desktop `main`
+/// is replaced on Android by the small stub at the bottom of this file.
+///
+/// This is initialization only: the APK packaging step (Gradle + NDK, cdylib
+/// target) is intentionally not part of this repository. See
+/// `docs/CROSS-PLATFORM.md` for the exact compile-check status.
+#[cfg(all(target_os = "android", feature = "android"))]
+mod android_entry {
+    use super::*;
+    use winit::platform::android::activity::AndroidApp;
+    use winit::platform::android::EventLoopBuilderExtAndroid;
+
+    #[no_mangle]
+    pub fn android_main(app: AndroidApp) {
+        env_logger::Builder::from_env(
+            env_logger::Env::default().default_filter_or(
+                "info,wgpu_core=warn,wgpu_hal=warn,naga=warn,egui_wgpu=warn",
+            ),
+        )
+        .format_timestamp_millis()
+        .init();
+
+        // Android has no HOME: the NativeActivity glue supplies the per-app
+        // internal data directory instead. Export it before `config::config_path`
+        // so the normal config loader (and `--config` on desktop) stay unified.
+        if std::env::var_os("PRETTY_CONFIG").is_none() {
+            if let Some(dir) = app.internal_data_path() {
+                let config_path = dir.join("config.toml");
+                std::env::set_var("PRETTY_CONFIG", &config_path);
+                log::info!("Android config path: {}", config_path.display());
+            }
+        }
+        let path = config::config_path(None);
+        let mut config = config::load(&path);
+        config.validate();
+
+        let renderer = std::env::var("PRETTY_RENDERER")
+            .ok()
+            .and_then(|value| value.parse::<RendererKind>().ok())
+            .or_else(|| config.renderer.parse::<RendererKind>().ok())
+            .unwrap_or(RendererKind::Auto);
+        log::info!(
+            "Pretty {VERSION} starting on Android: requested_renderer={renderer} config={}",
+            path.display()
+        );
+
+        let mut builder = EventLoop::<UserEvent>::with_user_event();
+        builder.with_android_app(app);
+        let event_loop = match builder.build() {
+            Ok(event_loop) => event_loop,
+            Err(e) => {
+                log::error!("failed to create Android event loop: {e}");
+                return;
+            }
+        };
+        event_loop.set_control_flow(winit::event_loop::ControlFlow::Wait);
+        let options = AppOptions {
+            renderer,
+            command: None,
+            fullscreen: false,
+            title: None,
+            config_path: path,
+            benchmark_frames: None,
+            allow_software: false,
+        };
+        let mut pretty_app = PrettyApp::new(config, options, event_loop.create_proxy());
+        if let Err(e) = event_loop.run_app(&mut pretty_app) {
+            log::error!("Android event loop failed: {e}");
+        }
+    }
+}
+
+/// `cargo check`/`cargo build` of this bin target need a Rust `main`, but an
+/// APK never calls it: `android-activity` invokes [`android_entry::android_main`].
+#[cfg(target_os = "android")]
+fn main() {
+    eprintln!(
+        "pretty: this is the Android bin-target stub; the NativeActivity entry point is android_main"
+    );
+}
+
+#[cfg(not(target_os = "android"))]
 fn main() -> ExitCode {
     env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or(
@@ -250,11 +355,9 @@ fn main() -> ExitCode {
     }
     config.validate();
 
-    if cli.print_info {
-        print_info(&config);
-        return ExitCode::SUCCESS;
-    }
-
+    // An explicitly requested backend that does not parse must fail loudly:
+    // silently running with `auto` hides a typo and can start a different GPU
+    // API than the one the user asked for.
     let renderer = cli
         .renderer
         .clone()
@@ -263,10 +366,18 @@ fn main() -> ExitCode {
     let renderer = match renderer.parse::<RendererKind>() {
         Ok(kind) => kind,
         Err(e) => {
-            log::error!("{e}");
-            RendererKind::Auto
+            eprintln!("pretty: {e}");
+            eprintln!(
+                "pretty: valid renderers are auto, vulkan, gles, metal (macOS builds) and dx (Windows builds)"
+            );
+            return ExitCode::FAILURE;
         }
     };
+
+    if cli.print_info {
+        print_info(&config);
+        return ExitCode::SUCCESS;
+    }
 
     // GLES still uses XWayland on this driver. Vulkan stays on native Wayland
     // so winit/IME use text-input-v3 (Fcitx's normal candidate popup) and KWin

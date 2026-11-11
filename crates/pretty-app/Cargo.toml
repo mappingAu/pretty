@@ -17,6 +17,10 @@ vulkan = ["pretty-renderer/vulkan"]
 gles = ["pretty-renderer/gles"]
 metal = ["pretty-renderer/metal"]
 dx = ["pretty-renderer/dx"]
+# NativeActivity glue for the android_main entry point. The AndroidApp type is
+# imported through winit's `android_activity` re-export, so no direct
+# android-activity dependency is declared (a second copy could link duplicate
+# glue).
 android = ["winit/android-native-activity"]
 
 [dependencies]

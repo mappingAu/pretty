@@ -24,7 +24,7 @@ pretty-<version>-windows-x86_64/
   README.md
   README-WINDOWS.txt
   LICENSE
-  docs/*.md
+  docs/*.md (including CROSS-PLATFORM.md and CROSS-COMPILE.md)
   icons/pretty-256.png
 ```
 

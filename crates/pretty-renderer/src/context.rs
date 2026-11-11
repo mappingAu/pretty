@@ -20,8 +20,8 @@ pub enum RendererError {
     Surface(String),
     #[error("failed to request GPU device: {0}")]
     Device(String),
-    #[error("unsupported backend: {0}")]
-    UnsupportedBackend(String),
+    #[error("{0}")]
+    Backend(#[from] crate::backend::BackendError),
     #[error("surface error: {0}")]
     SurfaceLost(String),
     #[error("font error: {0}")]
@@ -87,13 +87,14 @@ impl GpuContext {
         for candidate in &candidates {
             if !candidate.compile_enabled() {
                 if requested != RendererKind::Auto {
-                    return Err(RendererError::UnsupportedBackend(format!(
-                        "Pretty was built without the {candidate} feature"
-                    )));
+                    return Err(crate::backend::BackendError::FeatureNotCompiled {
+                        backend: *candidate,
+                    }
+                    .into());
                 }
                 continue;
             }
-            enabled |= wgpu_backends(*candidate);
+            enabled |= candidate.wgpu_backends();
         }
         if enabled.is_empty() {
             return Err(RendererError::NoAdapter(
@@ -135,14 +136,14 @@ impl GpuContext {
             };
             let mut matching: Vec<&Adapter> = adapters
                 .iter()
-                .filter(|a| {
-                    let info = a.get_info();
-                    info.backend == backend_of(*candidate)
-                })
+                .filter(|a| Some(a.get_info().backend) == candidate.wgpu_backend())
                 .collect();
             matching.sort_by_key(|a| adapter_rank(&a.get_info()));
             let Some(adapter) = matching.into_iter().next() else {
-                attempts.push(format!("{candidate}: no {:?} adapter", backend_of(*candidate)));
+                attempts.push(format!(
+                    "{candidate}: no {:?} adapter",
+                    candidate.wgpu_backend()
+                ));
                 continue;
             };
             let info = adapter.get_info();
@@ -183,16 +184,8 @@ impl GpuContext {
         if transparent_requested && !transparent {
             log::warn!("transparency was requested but the surface only supports opaque compositing");
         }
-        let format = choose_format(&caps.formats);
-        let present_mode = if vsync {
-            wgpu::PresentMode::Fifo
-        } else if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
-            wgpu::PresentMode::Mailbox
-        } else if caps.present_modes.contains(&wgpu::PresentMode::Immediate) {
-            wgpu::PresentMode::Immediate
-        } else {
-            wgpu::PresentMode::Fifo
-        };
+        let format = select_format(&caps.formats);
+        let present_mode = select_present_mode(vsync, &caps.present_modes);
         let size = window.inner_size();
         let width = size.width.max(1);
         let height = size.height.max(1);
@@ -266,27 +259,6 @@ impl GpuContext {
     }
 }
 
-fn backend_of(kind: RendererKind) -> Backend {
-    match kind {
-        RendererKind::Vulkan => Backend::Vulkan,
-        RendererKind::Gles => Backend::Gl,
-        RendererKind::Metal => Backend::Metal,
-        RendererKind::Dx => Backend::Dx12,
-        RendererKind::Auto => Backend::Vulkan,
-    }
-}
-
-/// The `wgpu::Backends` bit for one concrete renderer kind.
-fn wgpu_backends(kind: RendererKind) -> Backends {
-    match kind {
-        RendererKind::Vulkan => Backends::VULKAN,
-        RendererKind::Gles => Backends::GL,
-        RendererKind::Metal => Backends::METAL,
-        RendererKind::Dx => Backends::DX12,
-        RendererKind::Auto => Backends::empty(),
-    }
-}
-
 fn adapter_rank(info: &AdapterInfo) -> u8 {
     match info.device_type {
         DeviceType::DiscreteGpu => 0,
@@ -297,7 +269,9 @@ fn adapter_rank(info: &AdapterInfo) -> u8 {
     }
 }
 
-fn choose_format(formats: &[TextureFormat]) -> TextureFormat {
+/// Shared surface-format preference for every backend (Vulkan, GLES, Metal,
+/// Direct3D 12). sRGB first, then linear; unknown formats keep wgpu's first.
+pub(crate) fn select_format(formats: &[TextureFormat]) -> TextureFormat {
     for format in [
         TextureFormat::Bgra8UnormSrgb,
         TextureFormat::Rgba8UnormSrgb,
@@ -311,13 +285,27 @@ fn choose_format(formats: &[TextureFormat]) -> TextureFormat {
     formats[0]
 }
 
+/// Shared presentation-mode policy for every backend.
+pub(crate) fn select_present_mode(vsync: bool, modes: &[wgpu::PresentMode]) -> wgpu::PresentMode {
+    use wgpu::PresentMode;
+    if vsync {
+        return PresentMode::Fifo;
+    }
+    for mode in [PresentMode::Mailbox, PresentMode::Immediate] {
+        if modes.contains(&mode) {
+            return mode;
+        }
+    }
+    PresentMode::Fifo
+}
+
 /// Probe adapters without creating a window. Used by `pretty --print-info`.
 pub fn probe_adapters(kind: RendererKind) -> Vec<AdapterInfo> {
     let candidates = kind.candidates();
     let mut backends = Backends::empty();
     for c in &candidates {
         if c.compile_enabled() {
-            backends |= wgpu_backends(*c);
+            backends |= c.wgpu_backends();
         }
     }
     if backends.is_empty() {
@@ -331,4 +319,58 @@ pub fn probe_adapters(kind: RendererKind) -> Vec<AdapterInfo> {
         .into_iter()
         .map(|a| a.get_info())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wgpu::{PresentMode, TextureFormat};
+
+    #[test]
+    fn surface_format_prefers_srgb_then_linear() {
+        assert_eq!(
+            select_format(&[
+                TextureFormat::Rgba8Unorm,
+                TextureFormat::Rgba8UnormSrgb,
+                TextureFormat::Bgra8UnormSrgb,
+            ]),
+            TextureFormat::Bgra8UnormSrgb
+        );
+        assert_eq!(
+            select_format(&[TextureFormat::Rgba8Unorm, TextureFormat::Rgba8UnormSrgb]),
+            TextureFormat::Rgba8UnormSrgb
+        );
+        assert_eq!(
+            select_format(&[TextureFormat::Rgba16Float, TextureFormat::Rgba8Unorm]),
+            TextureFormat::Rgba8Unorm
+        );
+        // Unknown formats keep wgpu's first advertised format rather than
+        // failing surface creation on an exotic platform.
+        assert_eq!(
+            select_format(&[TextureFormat::Rgba16Float]),
+            TextureFormat::Rgba16Float
+        );
+    }
+
+    #[test]
+    fn present_mode_policy_is_shared() {
+        assert_eq!(
+            select_present_mode(true, &[PresentMode::Immediate]),
+            PresentMode::Fifo
+        );
+        assert_eq!(
+            select_present_mode(false, &[PresentMode::Fifo, PresentMode::Mailbox]),
+            PresentMode::Mailbox
+        );
+        assert_eq!(
+            select_present_mode(false, &[PresentMode::Fifo, PresentMode::Immediate]),
+            PresentMode::Immediate
+        );
+        // Missing Mailbox/Immediate falls back to Fifo, which every wgpu
+        // backend is required to support.
+        assert_eq!(
+            select_present_mode(false, &[PresentMode::Fifo]),
+            PresentMode::Fifo
+        );
+    }
 }

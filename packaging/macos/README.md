@@ -46,5 +46,6 @@ the compiled backends and the platform `auto` order.
 macOS artifacts are produced by `.github/workflows/build.yml` on
 `macos-latest` (Apple Silicon, arm64). The development host used for this
 release is Linux with no Apple linker, so the local check for this target is
-`cargo check` compile-only; see `docs/CROSS-COMPILE.md`. The macOS GUI was not
+`cargo check` compile-only; see `docs/CROSS-PLATFORM.md` for prerequisites and
+`docs/CROSS-COMPILE.md` for the generated result table. The macOS GUI was not
 executed on physical Mac hardware as part of this release.

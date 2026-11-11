@@ -8,6 +8,9 @@ pub mod x11;
 #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 pub mod other;
 
+/// Cross-platform XDG/AppData/Application Support path resolution.
+pub mod paths;
+
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub fn window_is_wayland(window: &winit::window::Window) -> bool {
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
