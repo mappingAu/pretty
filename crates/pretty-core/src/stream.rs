@@ -176,10 +176,14 @@ impl StreamFilter {
                     "APC sequence exceeds {} bytes; discarding the rest of the sequence",
                     self.max_apc
                 );
+                // The discarded payload may end with the first byte of an
+                // `ESC \` terminator. Remember it for the ignore state machine,
+                // otherwise a terminator split across reads is never
+                // recognised and all following output is swallowed.
+                self.ignore_prev_esc = self.payload.last() == Some(&0x1b);
                 self.payload.clear();
                 self.apc_scanned = 0;
                 self.mode = Mode::Ignore;
-                self.ignore_prev_esc = false;
             }
             return ApcProgress::Waiting;
         };
@@ -578,6 +582,38 @@ mod tests {
         let items = f.feed(b"\x1b\\ok");
         assert!(graphics(&items).is_empty());
         assert_eq!(bytes(items), b"ok");
+    }
+
+    #[test]
+    fn oversized_apc_recognises_terminator_split_across_reads() {
+        // The oversized payload ends with the ESC half of the `ESC \`
+        // terminator; the backslash arrives in the next read. The filter must
+        // still leave discard mode and forward the following output instead of
+        // swallowing the rest of the stream.
+        let mut f = StreamFilter::with_limits(32, 4096);
+        let mut wire = b"\x1b_G".to_vec();
+        wire.extend(std::iter::repeat(b'A').take(32));
+        wire.push(0x1b);
+        assert!(bytes(f.feed(&wire)).is_empty());
+        assert_eq!(f.mode, Mode::Ignore);
+        let items = f.feed(b"\\visible");
+        assert!(graphics(&items).is_empty());
+        assert_eq!(bytes(items), b"visible");
+    }
+
+    #[test]
+    fn oversized_apc_without_split_terminator_still_discards() {
+        // The discarded payload ends with data, so a later backslash is not a
+        // terminator and must not end discard mode early. Only BEL recovers.
+        let mut f = StreamFilter::with_limits(32, 4096);
+        let mut wire = b"\x1b_G".to_vec();
+        wire.extend(std::iter::repeat(b'A').take(33));
+        let _ = f.feed(&wire);
+        assert_eq!(f.mode, Mode::Ignore);
+        assert!(bytes(f.feed(b"\\not-a-terminator")).is_empty());
+        assert_eq!(f.mode, Mode::Ignore);
+        let items = f.feed(b"\x07after-bel");
+        assert_eq!(bytes(items), b"after-bel");
     }
 
     #[test]

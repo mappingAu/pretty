@@ -2,6 +2,7 @@
 
 use std::fmt;
 use std::process::ExitStatus;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use alacritty_terminal::event::{Event as VteEvent, EventListener, WindowSize};
@@ -78,16 +79,35 @@ impl fmt::Debug for TerminalEvent {
 #[derive(Clone)]
 pub struct EventSink {
     sender: crossbeam_channel::Sender<TerminalEvent>,
+    /// Suppress title events caused by `Term::set_options`. The option update
+    /// used by [`crate::Terminal::set_scrollback`] unconditionally emits a
+    /// title change in `alacritty_terminal`, which would otherwise reset the
+    /// window title whenever the user moves the scrollback slider.
+    suppress_title: Arc<AtomicBool>,
 }
 
 impl EventSink {
     pub fn new(sender: crossbeam_channel::Sender<TerminalEvent>) -> Self {
-        Self { sender }
+        Self {
+            sender,
+            suppress_title: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Drop `Title`/`ResetTitle` events while the flag is set. Internal to the
+    /// option-update path; the app never enables this for real terminal output.
+    pub(crate) fn set_suppress_title(&self, suppress: bool) {
+        self.suppress_title.store(suppress, Ordering::Relaxed);
     }
 }
 
 impl EventListener for EventSink {
     fn send_event(&self, event: VteEvent) {
+        if self.suppress_title.load(Ordering::Relaxed)
+            && matches!(event, VteEvent::Title(_) | VteEvent::ResetTitle)
+        {
+            return;
+        }
         let event = match event {
             VteEvent::Title(title) => TerminalEvent::Title(title),
             VteEvent::ResetTitle => TerminalEvent::ResetTitle,

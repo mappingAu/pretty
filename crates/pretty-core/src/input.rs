@@ -159,7 +159,6 @@ pub fn encode_key(mode: TermMode, event: &KeyInput) -> Vec<u8> {
     let kitty_active = flags != 0;
     let associated_text = flags & 16 != 0;
     let event_types = flags & 2 != 0;
-    let disambiguate = flags & 1 != 0;
     let all_keys = flags & 8 != 0;
     let alternate = flags & 4 != 0;
 
@@ -167,35 +166,47 @@ pub fn encode_key(mode: TermMode, event: &KeyInput) -> Vec<u8> {
     let mutating = event.modifiers.ctrl || event.modifiers.alt || event.modifiers.super_key;
 
     if kitty_active {
-        // Plain printable text without ctrl/alt/super remains ordinary text
-        // unless the app requested every key as CSI-u. This keeps shell input
-        // and IME text working while still supporting the enhanced protocol.
-        let plain_text = !mutating && !all_keys;
-        if plain_text {
-            if let Some(text) = &event.text {
-                if event.kind != KeyEventKind::Release {
-                    if !disambiguate && !event_types {
-                        return text.as_bytes().to_vec();
-                    }
-                    // Even with progressive enhancement, unmodified printable
-                    // text is normally sent as UTF-8; only report event types
-                    // when the application explicitly asked for them.
-                    if !event_types {
-                        return text.as_bytes().to_vec();
-                    }
+        // kitty's disambiguate rules keep Enter, Tab and Backspace on their
+        // legacy C0 encodings (and suppress their release events unless
+        // "report all keys" is active) so that a user can still type `reset`
+        // after an application that enabled the protocol crashed without
+        // restoring it. The old encoder emitted `CSI 13;1u` etc. for these
+        // keys when only disambiguate was requested.
+        if !all_keys {
+            if let Key::Named(
+                named @ (NamedKey::Enter | NamedKey::Tab | NamedKey::Backspace),
+            ) = event.key
+            {
+                if event.kind == KeyEventKind::Release {
+                    return Vec::new();
                 }
+                return encode_legacy_c0(named, event.modifiers);
             }
         }
-        if let Key::Char(c) = event.key {
-            if !mutating && !all_keys && !event_types && !associated_text {
-                if let Some(text) = &event.text {
+        // Plain printable text without ctrl/alt/super remains ordinary text
+        // unless the app requested every key as CSI-u (or associated text,
+        // which is only defined together with report-all-keys). This keeps
+        // shell input and IME text working. Report-event-types on its own does
+        // not turn text keys into escape codes and does not report a release
+        // for them; kitty deliberately has no release event for text keys in
+        // that mode.
+        let text_key = !mutating && !all_keys && !associated_text;
+        if text_key {
+            if event.kind == KeyEventKind::Release {
+                return Vec::new();
+            }
+            if let Some(text) = &event.text {
+                if !text.is_empty() && !text.chars().any(char::is_control) {
                     return text.as_bytes().to_vec();
                 }
+            }
+            if let Key::Char(c) = event.key {
                 let mut buf = [0u8; 4];
                 return c.encode_utf8(&mut buf).as_bytes().to_vec();
             }
+            // Named functional keys fall through to the escape encoder.
         }
-        return encode_kitty(event, flags, event_types, alternate, associated_text, has_text);
+        return encode_kitty(event, event_types, alternate, associated_text, has_text);
     }
 
     encode_legacy(mode, event)
@@ -203,30 +214,68 @@ pub fn encode_key(mode: TermMode, event: &KeyInput) -> Vec<u8> {
 
 fn encode_kitty(
     event: &KeyInput,
-    flags: u32,
     event_types: bool,
     alternate: bool,
     associated_text: bool,
     has_text: bool,
 ) -> Vec<u8> {
-    let Some(code) = key_unicode(event.key) else {
+    let Some(raw_code) = key_unicode(event.key) else {
         return Vec::new();
     };
-    // Kitty's alternate-key reporting puts the shifted key before the
-    // unshifted key: key[:shifted[:base]].
+    // kitty requires the unicode-key-code to be the *unshifted* key ("the
+    // codepoint used is always the lower-case (or more technically,
+    // un-shifted) version of the key"). The logical key reported by the
+    // windowing system is the shifted one for Shift+<key>, so recover the
+    // unshifted scalar from the base-layout key (winit's
+    // key-without-modifiers) or, for ASCII letters, by lower-casing. The
+    // shifted scalar is reported as the first alternate sub-field.
+    let mut code = raw_code;
+    let mut shifted = None;
+    if let Key::Char(c) = event.key {
+        if event.modifiers.shift {
+            let unshifted = event
+                .base_layout
+                .filter(|base| *base != c)
+                .unwrap_or_else(|| {
+                    if c.is_ascii_alphabetic() {
+                        c.to_ascii_lowercase()
+                    } else {
+                        c
+                    }
+                });
+            if unshifted != c {
+                code = unshifted as u32;
+                shifted = Some(c as u32);
+            }
+        }
+    }
+    // Alternate-key reporting: key[:shifted[:base]].
     let mut key_param = code.to_string();
     if alternate {
-        if let Key::Char(c) = event.key {
-            if c.is_ascii_alphabetic() && event.modifiers.shift {
-                key_param = format!("{code}:{code}");
+        let mut parts = vec![code.to_string()];
+        match shifted {
+            Some(shifted_code) => {
+                parts.push(shifted_code.to_string());
+                if let Some(base) = event.base_layout {
+                    let base_code = base as u32;
+                    if base_code != code {
+                        parts.push(base_code.to_string());
+                    }
+                }
+            }
+            None => {
+                if let Some(base) = event.base_layout {
+                    let base_code = base as u32;
+                    if base_code != code {
+                        // No shifted key, only a base layout key: use an empty
+                        // sub-field so the base key is not misread as shifted.
+                        parts.push(String::new());
+                        parts.push(base_code.to_string());
+                    }
+                }
             }
         }
-        if let Some(base) = event.base_layout {
-            let base_code = base as u32;
-            if base_code != code {
-                key_param = format!("{code}:{}:{base_code}", code);
-            }
-        }
+        key_param = parts.join(":");
     }
     let mods = 1 + event.modifiers.kitty_bits() as u32;
     let mut modifier = mods.to_string();
@@ -241,14 +290,17 @@ fn encode_kitty(
     // simpler for applications.
     if associated_text && has_text && event.kind != KeyEventKind::Release {
         let text = event.text.as_deref().unwrap_or("");
-        if !text.is_empty() {
-            let cps: Vec<String> = text.chars().map(|c| (c as u32).to_string()).collect();
+        let cps: Vec<String> = text
+            .chars()
+            .filter(|c| !c.is_control())
+            .map(|c| (c as u32).to_string())
+            .collect();
+        if !cps.is_empty() {
             seq.push(';');
             seq.push_str(&cps.join(":"));
         }
     }
     seq.push('u');
-    let _ = flags;
     seq.into_bytes()
 }
 
@@ -312,6 +364,42 @@ fn control_char(c: char) -> Option<u8> {
     }
 }
 
+/// Legacy C0 encodings for Enter, Tab and Backspace.
+///
+/// kitty's compatibility table (and xterm) differ from the naive encoding for
+/// ctrl/alt combinations: ctrl+Backspace is `0x08`, alt+Tab is `ESC TAB` and
+/// shift+alt+Tab is `ESC CSI Z`. These keys deliberately stay legacy even when
+/// the disambiguate flag is active (unless report-all-keys is also requested).
+fn encode_legacy_c0(key: NamedKey, m: Modifiers) -> Vec<u8> {
+    let mut out = Vec::new();
+    match key {
+        NamedKey::Enter => {
+            if m.alt {
+                out.push(0x1b);
+            }
+            out.push(b'\r');
+        }
+        NamedKey::Tab => {
+            if m.alt {
+                out.push(0x1b);
+            }
+            if m.shift {
+                out.extend_from_slice(b"\x1b[Z");
+            } else {
+                out.push(b'\t');
+            }
+        }
+        NamedKey::Backspace => {
+            if m.alt {
+                out.push(0x1b);
+            }
+            out.push(if m.ctrl { 0x08 } else { 0x7f });
+        }
+        _ => {}
+    }
+    out
+}
+
 fn encode_legacy_named(mode: TermMode, key: NamedKey, m: Modifiers) -> Vec<u8> {
     let app_cursor = mode.contains(TermMode::APP_CURSOR);
     let mods = m.legacy_param();
@@ -323,27 +411,8 @@ fn encode_legacy_named(mode: TermMode, key: NamedKey, m: Modifiers) -> Vec<u8> {
         }
     };
     match key {
-        NamedKey::Enter => {
-            let mut out = Vec::new();
-            if m.alt {
-                out.push(0x1b);
-            }
-            out.push(b'\r');
-            out
-        }
-        NamedKey::Tab => {
-            if m.shift {
-                b"\x1b[Z".to_vec()
-            } else {
-                b"\t".to_vec()
-            }
-        }
-        NamedKey::Backspace => {
-            if m.alt {
-                b"\x1b\x7f".to_vec()
-            } else {
-                vec![0x7f]
-            }
+        NamedKey::Enter | NamedKey::Tab | NamedKey::Backspace => {
+            encode_legacy_c0(key, m)
         }
         NamedKey::Escape => vec![0x1b],
         NamedKey::Insert => numbered(2),
@@ -650,6 +719,127 @@ mod tests {
         };
         let out = encode_key(mode, &ev);
         assert_eq!(out, b"\x1b[97;1:1;97u");
+    }
+
+    #[test]
+    fn kitty_disambiguate_keeps_enter_tab_backspace_legacy() {
+        // kitty's disambiguate flag explicitly exempts Enter/Tab/Backspace so
+        // that `reset` remains typeable after a crashed application. Before
+        // the fix these were emitted as `CSI 13;1u` etc.
+        let disambiguate = kitty_mode(0b1);
+        for (named, expected) in [
+            (NamedKey::Enter, b"\r".to_vec()),
+            (NamedKey::Tab, b"\t".to_vec()),
+            (NamedKey::Backspace, vec![0x7f]),
+        ] {
+            let ev = KeyInput { text: None, ..KeyInput::named(named) };
+            assert_eq!(encode_key(disambiguate, &ev), expected, "key {named:?}");
+        }
+        // They must not produce release events without report-all-keys.
+        let ev = KeyInput {
+            kind: KeyEventKind::Release,
+            text: None,
+            ..KeyInput::named(NamedKey::Enter)
+        };
+        assert!(encode_key(kitty_mode(0b11), &ev).is_empty());
+
+        // With report-all-keys they are ordinary CSI-u keys.
+        let all = kitty_mode(0b1000);
+        assert_eq!(encode_key(all, &KeyInput::named(NamedKey::Enter)), b"\x1b[13;1u");
+        assert_eq!(encode_key(all, &KeyInput::named(NamedKey::Tab)), b"\x1b[9;1u");
+        assert_eq!(
+            encode_key(all, &KeyInput::named(NamedKey::Backspace)),
+            b"\x1b[127;1u"
+        );
+    }
+
+    #[test]
+    fn kitty_event_types_alone_does_not_turn_text_into_csi_u() {
+        // Report-event-types (flag 2) is not report-all-keys (flag 8): text
+        // keys stay UTF-8 and have no release event, otherwise a program that
+        // only asked for event types receives escape codes it cannot map back
+        // to typed text.
+        let event_types = kitty_mode(0b10);
+        let press = KeyInput { text: Some("a".into()), ..KeyInput::char('a') };
+        assert_eq!(encode_key(event_types, &press), b"a");
+        let release = KeyInput {
+            kind: KeyEventKind::Release,
+            text: Some("a".into()),
+            ..KeyInput::char('a')
+        };
+        assert!(encode_key(event_types, &release).is_empty());
+        // Non-text keys still carry the event type.
+        let up = KeyInput::named(NamedKey::Up);
+        assert_eq!(encode_key(event_types, &up), b"\x1b[57352;1:1u");
+    }
+
+    #[test]
+    fn kitty_shifted_keys_report_the_unshifted_codepoint() {
+        // kitty: "the codepoint used is always the lower-case (or more
+        // technically, un-shifted) version of the key". Shift+A used to be
+        // encoded with key code 65 instead of 97.
+        let mode = kitty_mode(0b1101); // disambiguate + alternates + all keys
+        let ev = KeyInput {
+            text: Some("A".into()),
+            base_layout: Some('a'),
+            modifiers: Modifiers { shift: true, ..Modifiers::NONE },
+            ..KeyInput::char('A')
+        };
+        assert_eq!(encode_key(mode, &ev), b"\x1b[97:65;2u");
+
+        // The same correction must work without a base-layout key for ASCII.
+        let ev = KeyInput {
+            text: Some("A".into()),
+            modifiers: Modifiers { shift: true, ..Modifiers::NONE },
+            ..KeyInput::char('A')
+        };
+        assert_eq!(encode_key(mode, &ev), b"\x1b[97:65;2u");
+
+        // Associated text/event types keep working with the corrected code.
+        let mode = kitty_mode(0b11111);
+        let ev = KeyInput {
+            text: Some("A".into()),
+            base_layout: Some('a'),
+            modifiers: Modifiers { shift: true, ..Modifiers::NONE },
+            ..KeyInput::char('A')
+        };
+        assert_eq!(encode_key(mode, &ev), b"\x1b[97:65;2:1;65u");
+
+        // Shifted punctuation maps back to the unshifted key as well.
+        let ev = KeyInput {
+            text: Some("!".into()),
+            base_layout: Some('1'),
+            modifiers: Modifiers { shift: true, ..Modifiers::NONE },
+            ..KeyInput::char('!')
+        };
+        assert_eq!(encode_key(mode, &ev), b"\x1b[49:33;2:1;33u");
+    }
+
+    #[test]
+    fn legacy_c0_ctrl_and_alt_combinations() {
+        let ctrl_bs = KeyInput {
+            modifiers: Modifiers { ctrl: true, ..Modifiers::NONE },
+            ..KeyInput::named(NamedKey::Backspace)
+        };
+        assert_eq!(encode_key(TermMode::default(), &ctrl_bs), vec![0x08]);
+        let alt_bs = KeyInput {
+            modifiers: Modifiers { alt: true, ..Modifiers::NONE },
+            ..KeyInput::named(NamedKey::Backspace)
+        };
+        assert_eq!(encode_key(TermMode::default(), &alt_bs), b"\x1b\x7f");
+        let alt_tab = KeyInput {
+            modifiers: Modifiers { alt: true, ..Modifiers::NONE },
+            ..KeyInput::named(NamedKey::Tab)
+        };
+        assert_eq!(encode_key(TermMode::default(), &alt_tab), b"\x1b\t");
+        let shift_alt_tab = KeyInput {
+            modifiers: Modifiers { shift: true, alt: true, ..Modifiers::NONE },
+            ..KeyInput::named(NamedKey::Tab)
+        };
+        assert_eq!(
+            encode_key(TermMode::default(), &shift_alt_tab),
+            b"\x1b\x1b[Z"
+        );
     }
 
     #[test]

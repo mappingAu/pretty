@@ -35,6 +35,15 @@ const MAX_PLACEMENTS: usize = 1024;
 /// Upper bound on the base64-decoded payload accumulated across chunks.
 const MAX_PENDING_BYTES: usize = MAX_IMAGE_PIXELS as usize * 4 + 1024 * 1024;
 
+/// Upper bound for the human-readable part of an error response.
+///
+/// Error messages can embed attacker-controlled control values (for example a
+/// multi-megabyte `i=` field). The response is written back to the PTY, so an
+/// unbounded echo would let terminal output make the application allocate and
+/// write megabytes per command.
+const MAX_ERROR_TEXT: usize = 160;
+
+
 /// Resource budgets for one [`GraphicsStore`]. Defaults are the constants above;
 /// tests build stores with tiny budgets so the enforcement paths stay cheap.
 #[derive(Clone, Copy, Debug)]
@@ -565,10 +574,15 @@ impl GraphicsStore {
             debug!("kitty graphics error suppressed by q=2: {msg}");
             return GraphicsEvent { response: None };
         }
-        let clean: String = msg
+        // Keep the response (and the log line) bounded: `msg` can contain an
+        // arbitrarily long value copied from the graphics control section.
+        let mut chars = msg
             .chars()
-            .map(|c| if c.is_control() { ' ' } else { c })
-            .collect();
+            .map(|c| if c.is_control() { ' ' } else { c });
+        let mut clean: String = chars.by_ref().take(MAX_ERROR_TEXT).collect();
+        if chars.next().is_some() {
+            clean.push_str("...");
+        }
         let idpart = id.map(|i| format!("i={i};")).unwrap_or_default();
         warn!("kitty graphics error: {clean}");
         GraphicsEvent {
@@ -652,11 +666,11 @@ fn parse_control(text: &str) -> Result<Control, String> {
         }
         let (key, value) = part
             .split_once('=')
-            .ok_or_else(|| format!("malformed graphics control '{part}'"))?;
+            .ok_or_else(|| format!("malformed graphics control '{}'", snippet(part)))?;
         let mut chars = key.chars();
         let k = chars.next().ok_or("empty graphics key")?;
         if chars.next().is_some() {
-            return Err(format!("multi-character graphics key '{key}'"));
+            return Err(format!("multi-character graphics key '{}'", snippet(key)));
         }
         match k {
             'a' => c.action = value.chars().next(),
@@ -695,16 +709,29 @@ fn parse_control(text: &str) -> Result<Control, String> {
     Ok(c)
 }
 
+/// Shorten an attacker-controlled control-section value for an error message.
+///
+/// The graphics control section may be up to `MAX_APC` bytes; embedding it
+/// verbatim in a `String` would allocate that much per malformed command.
+fn snippet(value: &str) -> String {
+    const MAX: usize = 48;
+    let mut out: String = value.chars().take(MAX).collect();
+    if value.chars().nth(MAX).is_some() {
+        out.push_str("...");
+    }
+    out
+}
+
 fn parse_u32(value: &str, key: &str) -> Result<u32, String> {
     value
         .parse()
-        .map_err(|_| format!("invalid numeric value for {key}: '{value}'"))
+        .map_err(|_| format!("invalid numeric value for {key}: '{}'", snippet(value)))
 }
 
 fn parse_i32(value: &str, key: &str) -> Result<i32, String> {
     value
         .parse()
-        .map_err(|_| format!("invalid numeric value for {key}: '{value}'"))
+        .map_err(|_| format!("invalid numeric value for {key}: '{}'", snippet(value)))
 }
 
 fn decode_data(data: &str) -> Result<Vec<u8>, String> {

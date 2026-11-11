@@ -123,13 +123,20 @@ impl Frame {
     }
 
     pub fn selection_text_from_cells(&self) -> String {
-        let mut out = String::new();
+        let mut lines: Vec<String> = Vec::with_capacity(self.rows);
         for row in 0..self.rows {
             let mut last_non_space = 0usize;
             let mut line = String::new();
             for col in 0..self.cols {
                 let Some(cell) = self.cell(row, col) else { break };
-                if cell.attrs.selected && !cell.wide_spacer {
+                if cell.wide_spacer {
+                    // The second half of a wide character is not text: the
+                    // leading cell already carries the full character. Adding
+                    // a space here used to insert a spurious blank after every
+                    // CJK/emoji character in a copied selection.
+                    continue;
+                }
+                if cell.attrs.selected {
                     line.push(cell.c);
                     line.extend(cell.zero_width.iter());
                     if cell.c != ' ' {
@@ -140,12 +147,18 @@ impl Frame {
                 }
             }
             line.truncate(last_non_space);
-            out.push_str(&line);
-            if row + 1 < self.rows {
-                out.push('\n');
-            }
+            lines.push(line);
         }
-        out.trim_end().to_string()
+        // Rows outside the selection are empty; keeping them would prefix the
+        // copied text with blank lines whose count depends on the selection
+        // position (and on scrollback state).
+        while lines.first().is_some_and(|line| line.is_empty()) {
+            lines.remove(0);
+        }
+        while lines.last().is_some_and(|line| line.is_empty()) {
+            lines.pop();
+        }
+        lines.join("\n")
     }
 }
 

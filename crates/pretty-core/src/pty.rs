@@ -1,14 +1,32 @@
 //! Cross-platform PTY session built on `portable-pty`.
 
 use std::io::{Read, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
+use std::time::Duration;
 
-use crossbeam_channel::{bounded, Receiver, Sender};
+use crossbeam_channel::{bounded, Receiver, SendTimeoutError, Sender};
 use log::{debug, warn};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 
 use crate::CoreError;
+
+/// Exit status of a PTY child process, as reported by [`PtySession::try_wait`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PtyExitStatus {
+    /// Exit code (1 when the process was terminated by a signal).
+    pub code: u32,
+    /// Signal name on Unix if the process was terminated by a signal.
+    pub signal: Option<String>,
+}
+
+impl PtyExitStatus {
+    /// Whether the child completed successfully.
+    pub fn success(&self) -> bool {
+        self.signal.is_none() && self.code == 0
+    }
+}
 
 pub struct PtySession {
     master: Option<Box<dyn MasterPty + Send>>,
@@ -16,6 +34,9 @@ pub struct PtySession {
     child: Box<dyn Child + Send + Sync>,
     reader_thread: Option<JoinHandle<()>>,
     data_rx: Option<Receiver<Vec<u8>>>,
+    /// Set before joining the reader so a thread blocked on a full channel
+    /// exits instead of deadlocking `Drop`.
+    stop_reader: Arc<AtomicBool>,
     cols: u16,
     rows: u16,
     cell_w: u16,
@@ -71,18 +92,34 @@ impl PtySession {
             .map_err(|e| CoreError::Pty(format!("writer: {e}")))?;
 
         let (tx, rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = bounded(1024);
+        let stop_reader = Arc::new(AtomicBool::new(false));
+        let reader_stop = stop_reader.clone();
         let reader_thread = std::thread::Builder::new()
             .name("pretty-pty-reader".into())
             .spawn(move || {
                 let mut buf = [0u8; 65536];
                 loop {
+                    if reader_stop.load(Ordering::Relaxed) {
+                        break;
+                    }
                     match reader.read(&mut buf) {
                         Ok(0) => break,
                         Ok(n) => {
-                            if tx.send(buf[..n].to_vec()).is_err() {
-                                break;
+                            let mut pending = Some(buf[..n].to_vec());
+                            while let Some(bytes) = pending.take() {
+                                if reader_stop.load(Ordering::Relaxed) {
+                                    return;
+                                }
+                                // A bounded timeout (rather than a blocking
+                                // send) keeps `PtySession::drop` from hanging
+                                // forever when the app closes a pane while the
+                                // 1024-slot reader channel is full.
+                                match tx.send_timeout(bytes, Duration::from_millis(50)) {
+                                    Ok(()) => wake(),
+                                    Err(SendTimeoutError::Timeout(bytes)) => pending = Some(bytes),
+                                    Err(SendTimeoutError::Disconnected(_)) => return,
+                                }
                             }
-                            wake();
                         }
                         Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                         Err(e) => {
@@ -101,6 +138,7 @@ impl PtySession {
             child,
             reader_thread: Some(reader_thread),
             data_rx: Some(rx),
+            stop_reader,
             cols,
             rows,
             cell_w,
@@ -145,6 +183,22 @@ impl PtySession {
     pub fn child_pid(&self) -> Option<u32> {
         self.child.process_id()
     }
+
+    /// Check whether the child process has exited, without blocking.
+    ///
+    /// `pretty-app` owns the pane/tab lifecycle, so it has to poll this (for
+    /// example when the PTY reader channel disconnects or on an idle tick) to
+    /// close the pane of a finished shell. `alacritty_terminal`'s `ChildExit`
+    /// event is only emitted by its own event loop, which Pretty does not use.
+    /// The exit status is cached by the OS child handle, so a later `Drop`
+    /// still reaps the process correctly.
+    pub fn try_wait(&mut self) -> std::io::Result<Option<PtyExitStatus>> {
+        let status = self.child.try_wait()?;
+        Ok(status.map(|status| PtyExitStatus {
+            code: status.exit_code(),
+            signal: status.signal().map(str::to_owned),
+        }))
+    }
 }
 
 impl Drop for PtySession {
@@ -152,6 +206,10 @@ impl Drop for PtySession {
         if let Some(pid) = self.child.process_id() {
             debug!("terminating PTY child {pid}");
         }
+        // Stop the reader before joining it: if it is blocked in a channel
+        // send because nobody drains the output (pane being closed), killing
+        // the child alone would not unblock it.
+        self.stop_reader.store(true, Ordering::Relaxed);
         let _ = self.child.kill();
         let _ = self.child.wait();
         self.writer.take();

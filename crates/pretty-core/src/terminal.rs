@@ -86,6 +86,9 @@ pub struct Terminal {
     filter: StreamFilter,
     graphics: GraphicsStore,
     events: crossbeam_channel::Sender<TerminalEvent>,
+    /// The same sink held by the `Term`; used to suppress the spurious title
+    /// event that `Term::set_options` emits.
+    event_sink: EventSink,
     size: TermSize,
     generation: u64,
     hyperlink_ids: HashMap<String, u32>,
@@ -114,11 +117,8 @@ impl Terminal {
             default_cursor_style: config.cursor_style,
             ..TermConfig::default()
         };
-        let term = Term::new(
-            term_config.clone(),
-            &size,
-            EventSink::new(tx.clone()),
-        );
+        let event_sink = EventSink::new(tx.clone());
+        let term = Term::new(term_config.clone(), &size, event_sink.clone());
         let terminal = Self {
             term,
             term_config,
@@ -126,6 +126,7 @@ impl Terminal {
             filter: StreamFilter::new(),
             graphics: GraphicsStore::new(),
             events: tx,
+            event_sink,
             size,
             generation: 0,
             hyperlink_ids: HashMap::new(),
@@ -170,7 +171,12 @@ impl Terminal {
         );
         let mut config = self.term_config.clone();
         config.scrolling_history = lines;
+        // `Term::set_options` emits Title/ResetTitle as a side effect. That is
+        // correct for a real option reload, but a scrollback change must not
+        // reset the window title.
+        self.event_sink.set_suppress_title(true);
         self.term.set_options(config.clone());
+        self.event_sink.set_suppress_title(false);
         self.term_config = config;
         self.generation += 1;
         lines
@@ -303,9 +309,16 @@ impl Terminal {
         self.generation += 1;
     }
 
+    /// Select the entire terminal contents, including scrollback history.
+    ///
+    /// The selection endpoints are grid coordinates (negative lines are
+    /// history), so the result does not depend on the current scroll position.
+    /// Previously the top endpoint was `-display_offset`, which limited the
+    /// selection to the visible viewport and silently dropped history lines.
     pub fn select_all(&mut self) {
-        let top = Line(-(self.term.grid().display_offset() as i32));
-        let bottom = Line(top.0 + self.size.rows as i32 - 1);
+        let grid = self.term.grid();
+        let top = grid.topmost_line();
+        let bottom = grid.bottommost_line();
         self.term.selection = Some(Selection::new(
             SelectionType::Simple,
             Point::new(top, Column(0)),
@@ -607,6 +620,22 @@ mod tests {
         assert_eq!(term.scrollback(), MAX_SCROLLBACK_LINES);
         term.set_scrollback(4_096);
         assert_eq!(term.scrollback(), 4_096);
+    }
+
+    #[test]
+    fn set_scrollback_does_not_reset_the_window_title() {
+        let (mut term, rx) = Terminal::new(TermSize::new(10, 5), &CoreConfig::default());
+        // Drain the initial Wakeup event.
+        let _ = rx.try_iter().collect::<Vec<_>>();
+        term.set_scrollback(4_321);
+        let events: Vec<_> = rx.try_iter().collect();
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                TerminalEvent::Title(_) | TerminalEvent::ResetTitle
+            )),
+            "changing scrollback must not emit a title event: {events:?}"
+        );
     }
 
     #[test]

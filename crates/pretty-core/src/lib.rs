@@ -26,7 +26,7 @@ pub use input::{
     MouseButton, MouseEventKind,
 };
 pub use layout::{Axis, Layout, PaneId, Rect};
-pub use pty::PtySession;
+pub use pty::{PtyExitStatus, PtySession};
 pub use terminal::{CoreConfig, Terminal, TermSize, MAX_SCROLLBACK_LINES};
 /// Re-export needed to answer DA/colour queries from the application.
 pub use alacritty_terminal::vte::ansi::Rgb as VteRgb;
