@@ -158,8 +158,8 @@ A single-file Flatpak bundle is produced by:
 cargo build --release -p pretty-app
 cp target/release/pretty .portable-pretty   # optional; or pass PRETTY_FLATPAK_BIN
 scripts/build-flatpak.sh
-# dist/pretty-0.2.0-x86_64.flatpak
-flatpak install --user ./dist/pretty-0.2.0-x86_64.flatpak
+# dist/pretty-0.2.1-x86_64.flatpak
+flatpak install --user ./dist/pretty-0.2.1-x86_64.flatpak
 flatpak run io.github.mappingAu.Pretty
 ```
 
@@ -410,9 +410,9 @@ point; it is not a mock.
 
 `scripts/build-packages.sh` produces:
 
-- `dist/pretty-terminal_0.2.0_amd64.deb`
-- `dist/pretty-terminal-0.2.0-1.fc44.x86_64.rpm`
-- `dist/pretty-0.2.0-linux-x86_64.tar.gz`
+- `dist/pretty-terminal_0.2.1_amd64.deb`
+- `dist/pretty-terminal-0.2.1-1.fc44.x86_64.rpm`
+- `dist/pretty-0.2.1-linux-x86_64.tar.gz`
 
 All contain the binary, desktop entry, icons, man page and `TERM=pretty` terminfo
 entry. The deb/rpm packages install under `/usr`; the tarball is relocatable and
@@ -444,6 +444,7 @@ run (not to a GitHub release).
 - [Known issues](docs/KNOWN-ISSUES.md)
 - [Cross-platform status and prerequisites](docs/CROSS-PLATFORM.md)
 - [Cross-compile report](docs/CROSS-COMPILE.md)
+- [v0.2.1 fix and verification report](docs/TEST-REPORT-V0.2.1.md)
 - [v0.2.0 QA and test report](docs/TEST-REPORT-V0.2.0.md)
 - [0.2.0 core/UX audit](docs/AUDIT-020.md)
 

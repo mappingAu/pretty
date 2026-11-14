@@ -1,5 +1,5 @@
 Name:           pretty-terminal
-Version:        0.2.0
+Version:        0.2.1
 Release:        1%{?dist}
 Summary:        Hardware accelerated, kitty-compatible terminal emulator
 License:        GPL-3.0-or-later
@@ -56,10 +56,13 @@ tar -xzf %{SOURCE0} -C %{buildroot} --strip-components=1
 %{_docdir}/pretty/CROSS-PLATFORM.md
 %{_docdir}/pretty/CROSS-COMPILE.md
 %{_docdir}/pretty/TEST-REPORT-V0.2.0.md
+%{_docdir}/pretty/TEST-REPORT-V0.2.1.md
 %{_docdir}/pretty/AUDIT-020.md
 %{_docdir}/pretty/LICENSE
 %{_docdir}/pretty/copyright
 %{_docdir}/pretty/licenses
 %changelog
+* Sat Nov 14 2026 Pretty Authors <dev@pretty.local> - 0.2.1-1
+- 0.2.1: clean window close, aligned title bar/radii, stable fullscreen chrome
 * Sat Nov 07 2026 Pretty Authors <dev@pretty.local> - 0.2.0-1
 - 0.2.0: native Metal/DX12, GUI customization, Kitty config import, platform artifacts

@@ -57,7 +57,7 @@ which runs on Debian 12 (glibc 2.36) and Ubuntu 22.04+ (glibc 2.35).
 /usr/share/icons/hicolor/{scalable,16x16,24x24,32x32,48x48,64x64,128x128,256x256,512x512}/apps/
 /usr/share/man/man1/pretty.1.gz
 /usr/share/terminfo/p/pretty
-/usr/share/doc/pretty/{README,CONFIG,KITTY-COMPAT,TEST-REPORT,TEST-REPORT-V0.2.0,RENDERER,ARCHITECTURE,KNOWN-ISSUES,PACKAGING,CROSS-PLATFORM,CROSS-COMPILE,AUDIT-020}.md
+/usr/share/doc/pretty/{README,CONFIG,KITTY-COMPAT,TEST-REPORT,TEST-REPORT-V0.2.0,TEST-REPORT-V0.2.1,RENDERER,ARCHITECTURE,KNOWN-ISSUES,PACKAGING,CROSS-PLATFORM,CROSS-COMPILE,AUDIT-020}.md
 /usr/share/doc/pretty/licenses/
 ```
 
@@ -96,7 +96,7 @@ the existing desktop/icon/man/terminfo assets:
 
 ```bash
 scripts/build-flatpak.sh
-# dist/pretty-0.2.0-x86_64.flatpak
+# dist/pretty-0.2.1-x86_64.flatpak
 ```
 
 The bundle declares `org.freedesktop.Platform/x86_64/25.08`, bundles Noto CJK for
