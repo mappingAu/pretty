@@ -114,14 +114,24 @@ is intentionally compiled only when `gles` exists. New tests:
 
 ## 4. CI / release artifacts
 
-CI run: _(filled by the release pipeline)_ — Linux, Windows MSVC/DX12 and
-macOS arm64/Metal jobs build from this tree and upload `print-info-*.txt`.
-The Windows artifact's expected diagnostics:
+Native CI run: [43612515531](https://github.com/mappingAu/pretty/actions/runs/43612515531)
+(Linux, Windows MSVC/DX12 and macOS arm64/Metal jobs all succeeded).
+The uploaded Windows artifact reports:
 
 ```
 compiled_backends: vulkan=true gles=false dx=true
 auto_order: dx,vulkan
 ```
+
+and the macOS artifact reports:
+
+```
+compiled_backends: vulkan=true gles=false metal=true dx=false
+auto_order: metal,vulkan
+```
+
+The Linux release binary reports `vulkan=true gles=true`, `auto_order:
+vulkan,gles`.
 
 The Linux binary remains Vulkan-first with GLES available; the Windows binary
 has no GLES code; the macOS app bundle has Metal + Vulkan and no GLES.
