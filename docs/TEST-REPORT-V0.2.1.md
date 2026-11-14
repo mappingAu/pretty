@@ -176,8 +176,9 @@ After bumping the workspace version to 0.2.1 and rebuilding:
   tab bar/settings row on the same lines, and is responsive;
 - closing via KWin's `closeWindow()`: exit status 0, no new `coredumpctl`
   entry;
-- the X11/GLES path was not re-run with a compositor in this pass; the change
-  only affects teardown order and is shared by both platforms.
+- the X11/GLES path was smoke-tested separately: `--renderer gles` on
+  XWayland launched and closed with exit 0. The chrome screenshots in this
+  report are from native Wayland.
 
 ## Limitations
 
