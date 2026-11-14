@@ -1,16 +1,39 @@
+<div align="center">
+
 # Pretty
 
-## **Warning**: Part of the code for this project was written by AI (Vibe coding).
+**A fast, GPU-rendered terminal for people who like Konsole, but want kitty superpowers.**
 
-Pretty is a hardware-accelerated terminal emulator written in Rust. It targets
-the **kitty terminal protocol**, renders through **wgpu** with **Vulkan** on
-every platform plus **OpenGL ES 3.0+** on Linux, **Metal** on macOS and
-**Direct3D 12** on Windows,
-and is designed to feel familiar to Konsole users: graphical settings,
-tabs, find, configurable shortcuts, split panes, scrollback, native IME,
-clipboard integration and desktop notifications.
+Rust · `wgpu` · Vulkan on every platform (Metal on macOS, Direct3D 12 on Windows) · GPL-3.0
 
-![Pretty Vulkan feature demo](docs/screenshots/vulkan-features.png)
+> **Warning**: Part of the code for this project was written by AI (Vibe coding).
+
+[**Download v0.2.2**](https://github.com/mappingAu/pretty/releases/tag/v0.2.2)
+· [Features](#features)
+· [Install](#install)
+· [Configuration](#configuration)
+· [中文说明](README.zh-CN.md)
+· [About this README](#about-this-readme)
+
+</div>
+
+![Pretty: kitty graphics, tiling panes and a GUI settings panel](docs/screenshots/promo-hero.png)
+
+## Why Pretty?
+
+- **Familiar, not minimal.** Every common setting has a GUI (Ctrl+,): fonts,
+  themes, cursor, tabs, pane borders, transparency, key bindings. No config
+  file required — but `kitty.conf` imports in one command.
+- **kitty protocol, for real.** Graphics (PNG/RGB/RGBA, placements, z-index) so
+  `mpv --vo=kitty` and image previews work; the full keyboard protocol; OSC 8
+  hyperlinks; OSC 52 clipboard; desktop notifications.
+- **Built for Linux desktops.** Native Wayland text-input-v3 (Fcitx5 candidate
+  window in the right place), real KWin blur-behind for translucent windows,
+  per-pixel ARGB alpha on X11, HiDPI-correct UI, English and 简体中文.
+- **Tiling panes and tabs** with real PTYs, keyboard focus navigation,
+  full-scrollback search and configurable shortcuts.
+- **Honest engineering.** One renderer path through wgpu with typed backend
+  errors and no silent CPU fallback; hardware-tested reports in `docs/`.
 
 ## Status
 
@@ -281,6 +304,35 @@ example Xvfb and llvmpipe, or Windows' WARP software adapter). It is never
 enabled by default, logs a prominent warning, and is not used for any GPU
 rendering claim in this repository.
 
+## More screenshots
+
+![Pretty feature strip: KWin blur, tiling, kitty graphics, mpv over kitty, context menu, find, settings, powerline tabs](docs/screenshots/promo-strip.png)
+
+## Install
+
+Prebuilt binaries for every platform are attached to
+[**v0.2.2**](https://github.com/mappingAu/pretty/releases/tag/v0.2.2):
+
+| Platform | Asset | Install |
+|---|---|---|
+| Fedora / RHEL / openSUSE (RPM) | `pretty-terminal-0.2.2-1.x86_64.rpm` | `sudo dnf install ./pretty-terminal-0.2.2-1.x86_64.rpm` (or `zypper install`) |
+| Debian / Ubuntu | `pretty-terminal_0.2.2_amd64.deb` | `sudo apt install ./pretty-terminal_0.2.2_amd64.deb` |
+| Any Linux | `pretty-0.2.2-linux-x86_64.tar.gz` | `tar -xzf … && cd pretty-0.2.2-linux-x86_64 && ./install.sh`, or run `./bin/pretty` |
+| Windows 10/11 | `pretty-0.2.2-windows-x86_64.zip` | unzip and run `pretty.exe` (Direct3D 12 or Vulkan) |
+| macOS 11+ (arm64) | `pretty-0.2.2-macos-arm64.app.tar.gz` | unzip, move `Pretty.app` to Applications, run it |
+
+A Vulkan-capable GPU is required; Pretty never falls back to a CPU
+rasterizer. From source:
+
+```bash
+cargo build --release -p pretty-app    # Linux: Vulkan + OpenGL ES
+./target/release/pretty
+```
+
+See [Build](#build) for distribution packages and cross-platform feature sets.
+The Flatpak script is maintained but is not rebuilt on the release host; use the
+RPM, `.deb` or tarball above.
+
 ## Configuration
 
 Configuration is TOML at `~/.config/pretty/config.toml` (or `$PRETTY_CONFIG`,
@@ -420,7 +472,7 @@ point; it is not a mock.
 `scripts/build-packages.sh` produces:
 
 - `dist/pretty-terminal_0.2.2_amd64.deb`
-- `dist/pretty-terminal-0.2.2-1.fc44.x86_64.rpm`
+- `dist/pretty-terminal-0.2.2-1.x86_64.rpm`
 - `dist/pretty-0.2.2-linux-x86_64.tar.gz`
 
 All contain the binary, desktop entry, icons, man page and `TERM=pretty` terminfo
@@ -457,6 +509,23 @@ run (not to a GitHub release).
 - [v0.2.1 fix and verification report](docs/TEST-REPORT-V0.2.1.md)
 - [v0.2.0 QA and test report](docs/TEST-REPORT-V0.2.0.md)
 - [0.2.0 core/UX audit](docs/AUDIT-020.md)
+
+## Contributing and feedback
+
+- Found a bug or want a feature? [Open an issue](https://github.com/mappingAu/pretty/issues)
+  — please include the OS, GPU/driver (from `pretty --print-info`) and, for
+  crashes, the log. Known issues and honest limitations are listed in
+  [docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md).
+- Pull requests are welcome. Run `cargo test --workspace` and
+  `cargo build --release -p pretty-app` before submitting.
+- Configuration help is in [docs/CONFIG.md](docs/CONFIG.md); protocol coverage
+  is in [docs/KITTY-COMPAT.md](docs/KITTY-COMPAT.md).
+
+## About this README
+
+This landing page was rewritten for the v0.2.2 announcement; the original
+version is the [`docs/README-original.md`](docs/README-original.md) snapshot, or
+`git show v0.2.2:README.md`.
 
 ## License
 
