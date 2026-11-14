@@ -6,7 +6,7 @@
 #   dist/SHA256SUMS-macos.txt
 #
 # Run on macOS (CI uses macos-latest / Apple Silicon):
-#   cargo build --release -p pretty-app --features metal
+#   cargo build --release -p pretty-app --no-default-features --features vulkan,metal
 #   packaging/macos/package.sh
 #
 # scripts/build-macos.sh wraps both steps. Environment overrides:
@@ -23,7 +23,7 @@ ARCH=${PRETTY_ARCH:-$(uname -m)}
 BINARY=${PRETTY_BINARY:-target/release/pretty}
 
 [ -x "$BINARY" ] || {
-  echo "missing release binary '$BINARY'; run: cargo build --release -p pretty-app --features metal" >&2
+  echo "missing release binary '$BINARY'; run: cargo build --release -p pretty-app --no-default-features --features vulkan,metal" >&2
   exit 1
 }
 

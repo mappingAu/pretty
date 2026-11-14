@@ -8,7 +8,7 @@ and produces two archives:
 
 ```bash
 # On macOS, from the repository root:
-cargo build --release -p pretty-app --features metal
+cargo build --release -p pretty-app --no-default-features --features vulkan,metal
 packaging/macos/package.sh
 ```
 
@@ -37,9 +37,10 @@ is **not** Developer ID signed and not notarised.
 
 ## Expected backend behaviour
 
-The macOS release build passes `--features metal`, so `auto` prefers **Metal**
-and falls back to Vulkan (MoltenVK, when present). `pretty --print-info` lists
-the compiled backends and the platform `auto` order.
+The macOS release build passes `--no-default-features --features vulkan,metal`,
+so `auto` prefers **Metal** and falls back to Vulkan (MoltenVK, when present).
+GLES is not included in the macOS release. `pretty --print-info` lists the
+compiled backends and the platform `auto` order.
 
 ## Build provenance
 

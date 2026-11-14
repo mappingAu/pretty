@@ -41,21 +41,22 @@ jobs:
           - name: linux-x86_64
             os: ubuntu-latest
             platform: linux
-            # Linux never ships Metal/DX; Vulkan + GLES are the default features.
+            # Linux never ships Metal/DX; Vulkan + GLES are the default
+            # features. Vulkan remains the first `auto` choice.
             features_args: ""
           - name: windows-x86_64
             os: windows-latest
             platform: windows
-            # Portable zip with the Direct3D 12 backend compiled in; `auto`
-            # prefers DX12 on this binary.
-            features_args: "--features dx"
+            # Portable zip: Vulkan + Direct3D 12 only. GLES is disabled on
+            # Windows (issue #1).
+            features_args: "--no-default-features --features vulkan,dx"
           - name: macos
             os: macos-latest
             platform: macos
-            # .app bundle with the Metal backend compiled in; `auto` prefers
-            # Metal on this binary. The package script labels the artifact with
-            # the runner's uname -m (arm64 on GitHub public macOS runners).
-            features_args: "--features metal"
+            # .app bundle with Metal + Vulkan (MoltenVK); `auto` prefers Metal.
+            # The package script labels the artifact with the runner's uname -m
+            # (arm64 on GitHub public macOS runners).
+            features_args: "--no-default-features --features vulkan,metal"
 
     steps:
       - uses: actions/checkout@v4
@@ -87,8 +88,10 @@ jobs:
 
       - name: Unit tests
         # Pure unit tests only (protocol parsers, layout, config, backend
-        # selection); no GUI, GPU or display is opened here.
-        run: cargo test --workspace --locked
+        # selection); no GUI, GPU or display is opened here. On Windows/macOS
+        # this also exercises the release feature set (GLES omitted on
+        # Windows).
+        run: cargo test --workspace --locked ${{ matrix.features_args }}
 
       - name: Backend unit tests for the native backend feature
         # On Windows this compiles/runs the Direct3D 12 driver tests and on

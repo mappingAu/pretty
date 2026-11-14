@@ -1,4 +1,4 @@
-# Cross-platform status — Pretty 0.2.0
+# Cross-platform status — Pretty 0.2.2
 
 This document is the per-platform companion to the generated
 [`CROSS-COMPILE.md`](CROSS-COMPILE.md) result table. It separates three very
@@ -36,14 +36,16 @@ selecting an unavailable backend is a hard error — there is no silent fallback
 and no CPU rasteriser:
 
 * `BackendError::FeatureNotCompiled { backend }` — the binary was built without
-  e.g. `--features metal`; the message includes the exact rebuild flag.
+  e.g. `--no-default-features --features vulkan,metal`; the message includes
+  the exact rebuild flag.
 * `BackendError::WrongOperatingSystem { backend, host, required }` — compiled
   in, but e.g. Metal on Linux (`only available on macOS; this binary targets
   linux`). `RendererError::Backend` wraps this typed error for the app.
 
 Unit tests cover both gates: default builds assert the feature-missing errors;
-`--features metal` and `--features dx` builds on Linux assert the wrong-OS
-typed errors. The renderer test matrix runs all three on the host.
+`--no-default-features --features vulkan,metal` and
+`--no-default-features --features vulkan,dx` builds on Linux assert the
+wrong-OS typed errors. The renderer test matrix runs all three on the host.
 
 ### Surface policy shared by every backend
 
@@ -69,7 +71,7 @@ are unit-tested on the host, independent of GPU hardware.
 | Linux | Vulkan | Yes | Yes (native) | Yes (GTX 1050, KDE Wayland; `test-artifacts/hardware-*`) | Default features; release gate. |
 | Linux | GLES | Yes | Yes (native) | Yes (XWayland; `test-artifacts/hardware-*`) | Uses the local `vendor/wgpu-hal` EGL patch to force a real GLES context. |
 | Windows | Direct3D 12 | Yes (driver + shared surface policy) | Yes (`cargo check`, MSVC & GNU targets) | **No** | Native release build is defined in CI, not reproduced on this host. |
-| Windows | Vulkan / GLES | Yes (wgpu) | Yes (same check) | **No** | Available if the driver/feature is compiled; `auto` prefers DX12. |
+| Windows | Vulkan | Yes (wgpu) | Yes (same check) | **No** | Compiled into the Windows release; `auto` prefers DX12 then Vulkan. GLES is disabled on Windows (issue #1). |
 | macOS | Metal | Yes (driver + shared surface policy) | Yes (`cargo check`, x86-64 + arm64) | **No** | Needs Xcode/CLT and a Metal-capable Mac; not run here. |
 | macOS | Vulkan (MoltenVK) | Available through wgpu when compiled | Yes (same check) | **No** | Optional fallback; MoltenVK runtime not tested. |
 | Android | Vulkan + GLES | NativeActivity initialization only | `cargo check --features android` (see generated table) | **No** | No APK/Gradle packaging, no NDK link performed. |
@@ -99,10 +101,11 @@ are unit-tested on the host, independent of GPU hardware.
   MSVC v143 and the Windows 10/11 SDK (the linker comes from there).
 * Rust stable with the `x86_64-pc-windows-msvc` target; `rustup` is the
   supported way to get it.
-* Build: `cargo build --release -p pretty-app --features dx` from a
-  "x64 Native Tools Command Prompt", or `scripts/build-windows.sh` in Git Bash.
-  The release feature set deliberately keeps `vulkan,gles` as well; `auto`
-  prefers DX12.
+* Build: `cargo build --release -p pretty-app --no-default-features
+  --features vulkan,dx` from a "x64 Native Tools Command Prompt", or
+  `scripts/build-windows.sh` in Git Bash. The release feature set is
+  **Vulkan + Direct3D 12**; GLES is not compiled (issue #1). `auto` is
+  DX12 → Vulkan.
 * Package: `scripts/build-windows.sh --no-build` → `packaging/windows/package.ps1`
   (PowerShell 7) → `dist/pretty-<version>-windows-x86_64.zip`.
 * Runtime data: `%APPDATA%\pretty\pretty\config\config.toml`;
@@ -130,8 +133,9 @@ are unit-tested on the host, independent of GPU hardware.
   `codesign`, `sips` and `iconutil`.
 * Rust stable with the matching target: `aarch64-apple-darwin` (Apple Silicon)
   or `x86_64-apple-darwin` (Intel). Universal builds need both.
-* Build: `cargo build --release -p pretty-app --features metal`. Apple's
-  linker is only available on macOS; the Linux host cannot link this target.
+* Build: `cargo build --release -p pretty-app --no-default-features
+  --features vulkan,metal`. Apple's linker is only available on macOS; the
+  Linux host cannot link this target.
 * Package: `scripts/build-macos.sh --no-build` builds `Pretty.app`
   (`packaging/macos/package.sh`), ad-hoc signs it when `codesign` exists, and
   creates `.app.tar.gz` + standalone `.tar.gz`. It is **not** Developer ID
@@ -261,10 +265,10 @@ scripts/cross-check.sh
 # Just the target compile checks (requires rustup proxies on PATH or CARGO set):
 ~/.cargo/bin/rustup target add x86_64-pc-windows-msvc x86_64-pc-windows-gnu \
   x86_64-apple-darwin aarch64-apple-darwin aarch64-linux-android
-~/.cargo/bin/cargo check --target x86_64-pc-windows-msvc -p pretty-app --features dx --locked
-~/.cargo/bin/cargo check --target x86_64-pc-windows-gnu  -p pretty-app --features dx --locked
-~/.cargo/bin/cargo check --target x86_64-apple-darwin    -p pretty-app --features metal --locked
-~/.cargo/bin/cargo check --target aarch64-apple-darwin   -p pretty-app --features metal --locked
+~/.cargo/bin/cargo check --target x86_64-pc-windows-msvc -p pretty-app --no-default-features --features vulkan,dx --locked
+~/.cargo/bin/cargo check --target x86_64-pc-windows-gnu  -p pretty-app --no-default-features --features vulkan,dx --locked
+~/.cargo/bin/cargo check --target x86_64-apple-darwin    -p pretty-app --no-default-features --features vulkan,metal --locked
+~/.cargo/bin/cargo check --target aarch64-apple-darwin   -p pretty-app --no-default-features --features vulkan,metal --locked
 ~/.cargo/bin/cargo check --target aarch64-linux-android  -p pretty-app --features android --locked
 ```
 

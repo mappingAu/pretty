@@ -572,9 +572,23 @@ impl Config {
                 self.language = "auto".into();
             }
         }
-        if self.renderer.parse::<RendererKind>().is_err() {
-            log::warn!("invalid renderer '{}'; falling back to auto", self.renderer);
-            self.renderer = "auto".into();
+        match self.renderer.parse::<RendererKind>() {
+            Err(_) => {
+                log::warn!("invalid renderer '{}'; falling back to auto", self.renderer);
+                self.renderer = "auto".into();
+            }
+            Ok(kind) if !kind.platform_supported() || !kind.compile_enabled() => {
+                // A stale `renderer = "gles"` from a Windows config used to
+                // crash every launch (issue #1). Never let an unavailable
+                // backend make the terminal unstartable.
+                log::warn!(
+                    "renderer '{}' is not available in this build on {}; falling back to auto",
+                    self.renderer,
+                    std::env::consts::OS
+                );
+                self.renderer = "auto".into();
+            }
+            Ok(_) => {}
         }
         for (action, binding) in default_shortcuts() {
             self.shortcuts.entry(action).or_insert(binding);
@@ -1422,6 +1436,38 @@ mod tests {
         config.validate();
         assert_eq!(config.padding, 10.0);
         assert_eq!(config.gap, 5.0);
+    }
+
+    #[test]
+    fn unsupported_renderer_falls_back_to_auto() {
+        let mut config = Config::default();
+
+        config.renderer = "dx".into();
+        config.validate();
+        assert_eq!(
+            config.renderer,
+            if cfg!(target_os = "windows") { "dx" } else { "auto" }
+        );
+
+        config.renderer = "metal".into();
+        config.validate();
+        assert_eq!(
+            config.renderer,
+            if cfg!(target_os = "macos") { "metal" } else { "auto" }
+        );
+
+        // GLES is disabled on Windows (issue #1) and omitted from the
+        // Windows/macOS release feature sets; Linux keeps it.
+        config.renderer = "gles".into();
+        config.validate();
+        assert_eq!(
+            config.renderer,
+            if !cfg!(target_os = "windows") && cfg!(feature = "gles") {
+                "gles"
+            } else {
+                "auto"
+            }
+        );
     }
 
     #[test]

@@ -41,7 +41,7 @@ rebinding or clearing an action is reflected there immediately.
 
 | Key | Default | Notes |
 |---|---|---|
-| `renderer` | `"auto"` | `auto`, `vulkan`, `gles`, `metal` (macOS builds), `dx` (Windows builds); restart required |
+| `renderer` | `"auto"` | `auto`, `vulkan`, `gles` (Linux/macOS), `metal` (macOS builds), `dx` (Windows builds); **gles is not available on Windows** (issue #1) and is normalised to `auto`; restart required |
 | `vsync` | `true` | FIFO present mode |
 | `font_family` | `"JetBrains Mono"` | any installed system font family; falls back to the bundled JetBrains Mono with a warning if missing |
 | `font_size` | `15.0` | 7–42 px |

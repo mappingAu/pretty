@@ -8,7 +8,7 @@ members = ["crates/pretty-core", "crates/pretty-renderer", "crates/pretty-app"]
 resolver = "2"
 
 [workspace.package]
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 rust-version = "1.89"
 authors = ["Pretty Authors"]
@@ -18,7 +18,7 @@ description = "Pretty — a hardware-accelerated kitty-compatible terminal emula
 
 [workspace.dependencies]
 pretty-core = { path = "crates/pretty-core" }
-pretty-renderer = { path = "crates/pretty-renderer" }
+pretty-renderer = { path = "crates/pretty-renderer", default-features = false }
 
 alacritty_terminal = { version = "0.26.0", default-features = false }
 base64 = "0.22"

@@ -379,6 +379,25 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
+    // A config value is normalised by `Config::validate`; this catches an
+    // explicit --renderer/PRETTY_RENDERER request. In particular GLES is
+    // disabled on Windows until the crash in issue #1 is fixed.
+    if !renderer.platform_supported() || !renderer.compile_enabled() {
+        eprintln!(
+            "pretty: the {} backend is not available in this build on {}",
+            renderer,
+            std::env::consts::OS
+        );
+        if cfg!(target_os = "windows") {
+            eprintln!(
+                "pretty: use --renderer auto, vulkan or dx (GLES is disabled on Windows; see issue #1)"
+            );
+        } else {
+            eprintln!("pretty: use --renderer auto or vulkan");
+        }
+        return ExitCode::FAILURE;
+    }
+
     // GLES still uses XWayland on this driver. Vulkan stays on native Wayland
     // so winit/IME use text-input-v3 (Fcitx's normal candidate popup) and KWin
     // can blur through the org_kde_kwin_blur protocol. The former

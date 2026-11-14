@@ -4,19 +4,19 @@
 # Run on Windows (Git Bash / CI windows-latest), from anywhere:
 #   scripts/build-windows.sh              # cargo build + zip
 #   scripts/build-windows.sh --no-build   # package an existing release binary
-#   scripts/build-windows.sh --features dx --no-build
+#   scripts/build-windows.sh --features vulkan,dx --no-build
 #
 # Artifacts: dist/pretty-<version>-windows-x86_64.zip
 #            dist/SHA256SUMS-windows.txt
 #
-# The build uses `--features dx` by default so the Direct3D 12 backend is
-# compiled in and `auto` prefers it on Windows.
+# The build compiles Vulkan and Direct3D 12 but deliberately not GLES:
+# GLES crashes on Windows (issue #1), so `auto` is DX12 -> Vulkan.
 set -euo pipefail
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$ROOT"
 
 BUILD=1
-FEATURES=${PRETTY_FEATURES:-dx}
+FEATURES=${PRETTY_FEATURES:-vulkan,dx}
 while [ $# -gt 0 ]; do
   case "$1" in
     --no-build) BUILD=0 ;;
@@ -36,11 +36,11 @@ VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 BINARY=${PRETTY_BINARY:-target/release/pretty.exe}
 if [ "$BUILD" = 1 ]; then
   CARGO=${CARGO:-cargo}
-  echo "==> cargo build --release -p pretty-app --features $FEATURES"
-  "$CARGO" build --release -p pretty-app --features "$FEATURES" --locked
+  echo "==> cargo build --release -p pretty-app --no-default-features --features $FEATURES"
+  "$CARGO" build --release -p pretty-app --no-default-features --features "$FEATURES" --locked
 fi
 [ -f "$BINARY" ] || {
-  echo "missing release binary '$BINARY'; run: cargo build --release -p pretty-app --features dx" >&2
+  echo "missing release binary '$BINARY'; run: cargo build --release -p pretty-app --no-default-features --features vulkan,dx" >&2
   exit 1
 }
 

@@ -20,7 +20,8 @@ override it.
 
 Backends
 --------
-`auto` (the default) prefers Direct3D 12, then Vulkan, then OpenGL ES:
+`auto` (the default) prefers Direct3D 12, then Vulkan. GLES is disabled in
+this Windows build (it crashed at startup; see issue #1):
 
     pretty.exe --renderer auto
     pretty.exe --renderer dx

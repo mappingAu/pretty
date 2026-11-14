@@ -61,7 +61,10 @@ impl RendererKind {
         match self {
             Self::Auto => {
                 if cfg!(target_os = "windows") {
-                    vec![Self::Dx, Self::Vulkan, Self::Gles]
+                    // GLES is disabled on Windows: it crashes in the current
+                    // wgpu/GL path (issue #1) and is not compiled into release
+                    // binaries. See `platform_supported`.
+                    vec![Self::Dx, Self::Vulkan]
                 } else if cfg!(target_os = "macos") {
                     // wgpu's Vulkan backend can also run on macOS through
                     // MoltenVK when the feature is compiled in. Keep it as a
@@ -89,6 +92,9 @@ impl RendererKind {
     /// Operating system on which this backend can exist, if it is restricted.
     pub const fn required_os(self) -> Option<&'static str> {
         match self {
+            // GLES is disabled on Windows; it remains available on the
+            // other platforms. This is used by the wrong-platform error.
+            Self::Gles => Some("non-Windows platforms"),
             Self::Metal => Some("macOS"),
             Self::Dx => Some("Windows"),
             _ => None,
@@ -109,7 +115,10 @@ impl RendererKind {
     /// Whether this backend can exist on the host operating system at all.
     pub const fn platform_supported(self) -> bool {
         match self {
-            Self::Auto | Self::Vulkan | Self::Gles => true,
+            Self::Auto | Self::Vulkan => true,
+            // GLES is disabled on Windows until the crash reported in issue
+            // #1 is fixed. Release builds also omit the Cargo feature.
+            Self::Gles => !cfg!(target_os = "windows"),
             Self::Metal => cfg!(target_os = "macos"),
             Self::Dx => cfg!(target_os = "windows"),
         }
@@ -216,8 +225,9 @@ impl fmt::Display for BackendError {
                 required,
             } => write!(
                 f,
-                "the {backend} backend is only available on {required}; \
-                 this binary targets {host} (use --renderer vulkan or --renderer gles)"
+                "the {backend} backend is not available on {host} \
+                 (supported on {required}); use --renderer vulkan \
+                 or another available backend"
             ),
             Self::NoConcreteBackend => {
                 f.write_str("internal error: 'auto' is a selection policy, not a backend driver")
@@ -352,7 +362,6 @@ impl BackendDriver for DxDriver {
     }
 }
 
-#[cfg(any(feature = "metal", feature = "dx"))]
 fn ensure_platform(kind: RendererKind) -> Result<(), BackendError> {
     if kind.platform_supported() {
         return Ok(());
@@ -384,6 +393,7 @@ pub fn driver_for(kind: RendererKind) -> Result<Box<dyn BackendDriver>, BackendE
         RendererKind::Gles => {
             #[cfg(feature = "gles")]
             {
+                ensure_platform(RendererKind::Gles)?;
                 Ok(Box::new(GlesDriver))
             }
             #[cfg(not(feature = "gles"))]
@@ -429,7 +439,7 @@ mod tests {
 
     fn expected_auto_order() -> Vec<RendererKind> {
         if cfg!(target_os = "windows") {
-            vec![RendererKind::Dx, RendererKind::Vulkan, RendererKind::Gles]
+            vec![RendererKind::Dx, RendererKind::Vulkan]
         } else if cfg!(target_os = "macos") {
             vec![RendererKind::Metal, RendererKind::Vulkan]
         } else {
@@ -466,7 +476,10 @@ mod tests {
     #[test]
     fn platform_support_is_os_specific() {
         assert!(RendererKind::Vulkan.platform_supported());
-        assert!(RendererKind::Gles.platform_supported());
+        assert_eq!(
+            RendererKind::Gles.platform_supported(),
+            !cfg!(target_os = "windows")
+        );
         assert_eq!(RendererKind::Metal.platform_supported(), cfg!(target_os = "macos"));
         assert_eq!(RendererKind::Dx.platform_supported(), cfg!(target_os = "windows"));
     }
@@ -478,6 +491,7 @@ mod tests {
         assert_eq!(RendererKind::Metal.required_feature(), Some("metal"));
         assert_eq!(RendererKind::Dx.required_feature(), Some("dx"));
         assert_eq!(RendererKind::Auto.required_feature(), None);
+        assert_eq!(RendererKind::Gles.required_os(), Some("non-Windows platforms"));
         assert_eq!(RendererKind::Metal.required_os(), Some("macOS"));
         assert_eq!(RendererKind::Dx.required_os(), Some("Windows"));
         assert_eq!(RendererKind::Vulkan.required_os(), None);
@@ -517,13 +531,40 @@ mod tests {
         assert_eq!(driver.wgpu_backends(), Backends::VULKAN);
     }
 
-    #[cfg(feature = "gles")]
+    #[cfg(all(feature = "gles", not(target_os = "windows")))]
     #[test]
     fn gles_driver_uses_the_gl_wgpu_backend() {
         let driver = driver_for(RendererKind::Gles).expect("gles feature is compiled in");
         assert_eq!(driver.kind(), RendererKind::Gles);
         assert_eq!(driver.wgpu_backend(), Backend::Gl);
         assert_eq!(driver.wgpu_backends(), Backends::GL);
+    }
+
+    #[cfg(all(feature = "gles", target_os = "windows"))]
+    #[test]
+    fn gles_on_windows_is_a_typed_wrong_os_error() {
+        match driver_for(RendererKind::Gles) {
+            Err(error) => {
+                assert_eq!(
+                    error,
+                    BackendError::WrongOperatingSystem {
+                        backend: RendererKind::Gles,
+                        host: std::env::consts::OS,
+                        required: "non-Windows platforms",
+                    }
+                );
+                let message = error.to_string();
+                assert!(
+                    message.contains("not available on windows"),
+                    "unexpected message: {message}"
+                );
+                assert!(
+                    message.contains("--renderer vulkan"),
+                    "unexpected message: {message}"
+                );
+            }
+            Ok(_) => panic!("GLES must not be constructed on Windows"),
+        }
     }
 
     #[cfg(all(feature = "metal", not(target_os = "macos")))]

@@ -5,7 +5,7 @@
 
 ```powershell
 # From the repository root on Windows (PowerShell 7):
-cargo build --release -p pretty-app --features dx
+cargo build --release -p pretty-app --no-default-features --features vulkan,dx
 pwsh -File packaging/windows/package.ps1
 ```
 
@@ -32,8 +32,9 @@ pretty-<version>-windows-x86_64/
 
 ## Expected backend behaviour
 
-Windows release builds pass `--features dx`, so the `auto` order is
-**Direct3D 12 → Vulkan → OpenGL ES**. `pretty.exe --print-info` shows the
+Windows release builds pass `--no-default-features --features vulkan,dx`, so
+the `auto` order is **Direct3D 12 → Vulkan**; GLES is not compiled (disabled
+after the startup crash in issue #1). `pretty.exe --print-info` shows the
 compiled features, the `auto` order and the enumerated adapters.
 
 * The binaries are unsigned; SmartScreen may warn. This is documented in

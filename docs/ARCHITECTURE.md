@@ -233,7 +233,8 @@ the cell metrics; the renderer reconfigures the swapchain before using new dimen
 2. `PRETTY_RENDERER` environment variable (`vulkan`, `gles`, `metal`, `dx`, `auto`);
 3. config file (`renderer = "..."`);
 4. `auto`, with a platform-aware order: Windows prefers Direct3D 12, macOS
-   prefers Metal and Linux/FreeBSD/Android prefer Vulkan then GLES.
+   prefers Metal, Windows prefers DX12 then Vulkan (GLES is disabled on
+   Windows; see issue #1), and Linux/FreeBSD/Android prefer Vulkan then GLES.
 
 Each candidate is probed by creating a `wgpu` instance restricted to that backend,
 enumerating adapters and matching a surface-compatible adapter. A candidate that fails
@@ -369,12 +370,14 @@ Settings persist to the platform config directory as TOML.
   with logging.
 * Windows uses ConPTY through `portable-pty`; no `/dev`, `/proc` or POSIX path is used in
   cross-platform modules.
-* macOS uses the Unix PTY path and the Metal backend (`--features metal`); `auto`
-  prefers Metal and falls back to Vulkan through MoltenVK when available. Native
+* macOS uses the Unix PTY path and the Metal backend
+  (`--no-default-features --features vulkan,metal`); `auto` prefers Metal and
+  falls back to Vulkan through MoltenVK when available. Native
   macOS binaries are built and unit-tested by CI, not executed on physical Mac
   hardware in this release.
-* Windows uses the Direct3D 12 backend (`--features dx`); `auto` prefers DX12 and
-  falls back to Vulkan/GLES when compiled and available. Native Windows binaries are
+* Windows uses the Direct3D 12 backend
+  (`--no-default-features --features vulkan,dx`); `auto` prefers DX12 and falls
+  back to Vulkan. GLES is disabled on Windows (see issue #1). Native Windows binaries are
   built and unit-tested by CI, not executed on physical Windows hardware in this
   release.
 * Android has a compile-only target check today. The cross-check reports the

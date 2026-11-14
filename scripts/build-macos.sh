@@ -4,20 +4,20 @@
 # Run on macOS (CI macos-latest), from anywhere:
 #   scripts/build-macos.sh              # cargo build + bundle + tar.gz
 #   scripts/build-macos.sh --no-build   # package an existing release binary
-#   scripts/build-macos.sh --features metal --no-build
+#   scripts/build-macos.sh --features vulkan,metal --no-build
 #
 # Artifacts: dist/pretty-<version>-macos-<arch>.app.tar.gz
 #            dist/pretty-<version>-macos-<arch>.tar.gz
 #            dist/SHA256SUMS-macos.txt
 #
-# The build uses `--features metal` by default so the Metal backend is compiled
-# in and `auto` prefers it on macOS.
+# The build compiles Vulkan and Metal (but not GLES) so `auto` is
+# Metal -> Vulkan on macOS.
 set -euo pipefail
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$ROOT"
 
 BUILD=1
-FEATURES=${PRETTY_FEATURES:-metal}
+FEATURES=${PRETTY_FEATURES:-vulkan,metal}
 while [ $# -gt 0 ]; do
   case "$1" in
     --no-build) BUILD=0 ;;
@@ -33,8 +33,8 @@ done
 
 if [ "$BUILD" = 1 ]; then
   CARGO=${CARGO:-cargo}
-  echo "==> cargo build --release -p pretty-app --features $FEATURES"
-  "$CARGO" build --release -p pretty-app --features "$FEATURES" --locked
+  echo "==> cargo build --release -p pretty-app --no-default-features --features $FEATURES"
+  "$CARGO" build --release -p pretty-app --no-default-features --features "$FEATURES" --locked
 fi
 
 echo "==> staging Pretty.app and tarballs"

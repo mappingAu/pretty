@@ -44,7 +44,7 @@ try {
         $Binary = "target/release/pretty.exe"
     }
     if (-not (Test-Path -Path $Binary -PathType Leaf)) {
-        throw "missing release binary '$Binary'; run: cargo build --release -p pretty-app --features dx"
+        throw "missing release binary '$Binary'; run: cargo build --release -p pretty-app --no-default-features --features vulkan,dx"
     }
     if (-not $OutDir) { $OutDir = "dist" }
 

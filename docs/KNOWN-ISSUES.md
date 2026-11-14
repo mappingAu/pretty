@@ -18,6 +18,17 @@ renderer or represent a compile-only stub as a supported platform.
   new frame, at compositor refresh rate) is gone; the fullscreen title bar no
   longer repaints continuously. See `docs/TEST-REPORT-V0.2.1.md`.
 
+## Windows GLES backend (disabled in 0.2.2)
+
+- Selecting **GLES** on Windows crashed immediately and persisted
+  `renderer = "gles"`, which made every subsequent launch fail
+  ([issue #1](https://github.com/mappingAu/pretty/issues/1)). The backend is
+  therefore disabled on Windows in 0.2.2: release builds omit the `gles`
+  feature, `RendererKind::Gles` reports `platform_supported = false`, the
+  settings UI does not offer it, and a stale config value is rewritten to
+  `auto` with a warning. **Vulkan + Direct3D 12** remain available on Windows.
+  The underlying wgpu/ANGLE crash is deferred to the next version.
+
 ## UX follow-up gaps
 
 - **Touch was verified with synthetic XInput2/uinput injection on this host's

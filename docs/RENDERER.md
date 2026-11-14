@@ -40,7 +40,7 @@ The `auto` candidate order is platform-aware:
 
 | Target OS | `auto` order |
 |---|---|
-| Windows | Direct3D 12 → Vulkan → GLES |
+| Windows | Direct3D 12 → Vulkan (GLES disabled; see issue #1) |
 | macOS | Metal → Vulkan (MoltenVK) |
 | Linux / FreeBSD / Android | Vulkan → GLES |
 
@@ -82,7 +82,7 @@ Feature wiring is explicit:
 | Cargo feature | wgpu feature | Platform | `auto` position |
 |---|---|---|---|
 | `vulkan` | `wgpu/vulkan` | Linux/Windows/macOS (MoltenVK) | after the native API |
-| `gles` | `wgpu/gles` | Linux/Android/Windows | last |
+| `gles` | `wgpu/gles` | Linux/Android (disabled on Windows, see issue #1) | last |
 | `metal` | `wgpu/metal` | macOS | first on macOS |
 | `dx` | `wgpu/dx12` | Windows | first on Windows |
 

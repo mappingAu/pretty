@@ -196,13 +196,13 @@ run_check "host-tests-dx" host - dx \
 
 # --- cross-target checks ---------------------------------------------------
 run_check "windows-msvc-dx" target x86_64-pc-windows-msvc dx \
-  "$CARGO" check --target x86_64-pc-windows-msvc -p pretty-app --features dx --locked
+  "$CARGO" check --target x86_64-pc-windows-msvc -p pretty-app --no-default-features --features vulkan,dx --locked
 run_check "windows-gnu-dx" target x86_64-pc-windows-gnu dx \
-  "$CARGO" check --target x86_64-pc-windows-gnu -p pretty-app --features dx --locked
+  "$CARGO" check --target x86_64-pc-windows-gnu -p pretty-app --no-default-features --features vulkan,dx --locked
 run_check "macos-x86_64-metal" target x86_64-apple-darwin metal \
-  "$CARGO" check --target x86_64-apple-darwin -p pretty-app --features metal --locked
+  "$CARGO" check --target x86_64-apple-darwin -p pretty-app --no-default-features --features vulkan,metal --locked
 run_check "macos-aarch64-metal" target aarch64-apple-darwin metal \
-  "$CARGO" check --target aarch64-apple-darwin -p pretty-app --features metal --locked
+  "$CARGO" check --target aarch64-apple-darwin -p pretty-app --no-default-features --features vulkan,metal --locked
 run_check "android-aarch64" target aarch64-linux-android android \
   "$CARGO" check --target aarch64-linux-android -p pretty-app --features android --locked
 

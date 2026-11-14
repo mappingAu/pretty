@@ -1127,11 +1127,17 @@ fn rendering(
                 // Windows binaries; the platform-native API is picked
                 // automatically via `auto`, so only advertise what can work
                 // here. (Previously these were mislabelled "reserved".)
-                let mut options: Vec<&str> = vec!["auto", "vulkan", "gles"];
-                if cfg!(target_os = "macos") {
+                // GLES is disabled on Windows (issue #1): it crashes and
+                // would leave an unopenable config. Only advertise backends
+                // that can actually start on this platform.
+                let mut options: Vec<&str> = vec!["auto", "vulkan"];
+                if !cfg!(target_os = "windows") && cfg!(feature = "gles") {
+                    options.push("gles");
+                }
+                if cfg!(target_os = "macos") && cfg!(feature = "metal") {
                     options.push("metal");
                 }
-                if cfg!(target_os = "windows") {
+                if cfg!(target_os = "windows") && cfg!(feature = "dx") {
                     options.push("dx");
                 }
                 for value in options {

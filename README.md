@@ -3,8 +3,9 @@
 ## **Warning**: Part of the code for this project was written by AI (Vibe coding).
 
 Pretty is a hardware-accelerated terminal emulator written in Rust. It targets
-the **kitty terminal protocol**, renders through **wgpu** with **Vulkan** or
-**OpenGL ES 3.0+** on Linux, **Metal** on macOS and **Direct3D 12** on Windows,
+the **kitty terminal protocol**, renders through **wgpu** with **Vulkan** on
+every platform plus **OpenGL ES 3.0+** on Linux, **Metal** on macOS and
+**Direct3D 12** on Windows,
 and is designed to feel familiar to Konsole users: graphical settings,
 tabs, find, configurable shortcuts, split panes, scrollback, native IME,
 clipboard integration and desktop notifications.
@@ -16,9 +17,9 @@ clipboard integration and desktop notifications.
 | Area | State |
 |---|---|
 | Vulkan backend | **working**, tested on an NVIDIA GTX 1050 / driver 580.196.07 (580.178.04 in the earlier 0.1.0 evidence) |
-| GLES backend | **working**, tested with a real OpenGL ES 3.2 NVIDIA context |
-| Metal backend (macOS) | **implemented** — `--features metal`; `auto` prefers Metal on macOS. Built by CI on `macos-latest`; the GUI was not run on physical Mac hardware in this release |
-| Direct3D 12 backend (Windows) | **implemented** — `--features dx`; `auto` prefers DX12 on Windows. Built by CI on `windows-latest`; the GUI was not run on physical Windows hardware in this release |
+| GLES backend | **working on Linux**, tested with a real OpenGL ES 3.2 NVIDIA context; **disabled on Windows** until issue #1 is fixed |
+| Metal backend (macOS) | **implemented** — `--no-default-features --features vulkan,metal`; `auto` prefers Metal on macOS. Built by CI on `macos-latest`; the GUI was not run on physical Mac hardware in this release |
+| Direct3D 12 backend (Windows) | **implemented** — `--no-default-features --features vulkan,dx`; `auto` prefers DX12 on Windows (GLES disabled). Built by CI on `windows-latest`; the GUI was not run on physical Windows hardware in this release |
 | kitty graphics | PNG/RGB/RGBA, chunked transfer, placement, delete, query, z-index; animation/file/SHM are not implemented |
 | kitty keyboard | all five progressive-enhancement flags, query/push/pop, tested CSI-u output |
 | Tabs / find / shortcuts | tab bar (top/bottom, separator/fade/powerline, alignment, minimum tabs, label templates, colours), full-scrollback find, GUI-editable key bindings, theme presets and kitty.conf import |
@@ -26,7 +27,7 @@ clipboard integration and desktop notifications.
 | Cursor blink | timer-thread driven + advanced on every presented frame, so rapid mouse input cannot starve it; verified with 60 fps capture |
 | IME | native Wayland text-input-v3; X11 XIM fallback; per-app Fcitx state is preserved |
 | Tiling, transparency, blur | working tiling panes; native KWin Wayland `ext_background_effect_v1` + X11 per-pixel ARGB alpha with real blur |
-| Packages | deb, rpm and relocatable tar.gz on Linux (built and hash-verified for this pre-release); portable Windows zip and macOS `.app`/tar.gz from CI with desktop entry, icon, man page and terminfo. The Flatpak script is maintained but was not rebuilt for this pre-release (no `flatpak-builder` on the build host) |
+| Packages | deb, rpm and relocatable tar.gz on Linux (built and hash-verified for this release); portable Windows zip and macOS `.app`/tar.gz from CI with desktop entry, icon, man page and terminfo. The Flatpak script is maintained but was not rebuilt for this release (no `flatpak-builder` on the build host) |
 | License | GPL-3.0-or-later; bundled fonts remain OFL-1.1 |
 
 See [docs/KITTY-COMPAT.md](docs/KITTY-COMPAT.md) for the item-by-item protocol
@@ -35,15 +36,17 @@ matrix, [docs/TEST-REPORT.md](docs/TEST-REPORT.md) for real-hardware evidence an
 
 ## Platform support
 
-`auto` is platform-aware: Windows prefers Direct3D 12, macOS prefers Metal, and
-Linux/FreeBSD/Android prefer Vulkan then OpenGL ES. The table separates what was
-executed on real hardware from what was only compiled or CI-built.
+`auto` is platform-aware: Windows prefers Direct3D 12 (then Vulkan; GLES is
+disabled there), macOS prefers Metal then Vulkan, and Linux/FreeBSD/Android
+prefer Vulkan then OpenGL ES. The table separates what was executed on real
+hardware from what was only compiled or CI-built. Vulkan is compiled into every
+platform release build.
 
 | Platform | `auto` order | Evidence in this release | Native artifact |
 |---|---|---|---|
 | Linux / FreeBSD | Vulkan → GLES | built **and hardware-tested** on this host | Flatpak/deb/rpm/tar.gz from `scripts/build-packages.sh`; CI `ubuntu-latest` tar.gz |
-| Windows 10/11 x86_64 | DX12 → Vulkan → GLES | `cargo check --target x86_64-pc-windows-gnu --features dx` locally (no MinGW linker) + CI build/test on `windows-latest` | `pretty-<ver>-windows-x86_64.zip` |
-| macOS 11+ | Metal → Vulkan (MoltenVK) | `cargo check --target aarch64-apple-darwin --features metal` locally (no Apple linker) + CI build/test on `macos-latest` (arm64 on public GitHub runners) | `pretty-<ver>-macos-<arch>.app.tar.gz` / `.tar.gz` |
+| Windows 10/11 x86_64 | DX12 → Vulkan (GLES disabled) | `cargo check --target x86_64-pc-windows-gnu --no-default-features --features vulkan,dx` locally (no MinGW linker) + CI build/test on `windows-latest` | `pretty-<ver>-windows-x86_64.zip` |
+| macOS 11+ | Metal → Vulkan (MoltenVK) | `cargo check --target aarch64-apple-darwin --no-default-features --features vulkan,metal` locally (no Apple linker) + CI build/test on `macos-latest` (arm64 on public GitHub runners) | `pretty-<ver>-macos-<arch>.app.tar.gz` / `.tar.gz` |
 | Android arm64 | Vulkan → GLES | `cargo check --target aarch64-linux-android --features android` only; **no APK is claimed** | — (needs NDK, `android-activity` entry, storage and soft-keyboard work) |
 
 "Implemented" means the backend is selected through wgpu and the full renderer
@@ -158,16 +161,16 @@ A single-file Flatpak bundle is produced by:
 cargo build --release -p pretty-app
 cp target/release/pretty .portable-pretty   # optional; or pass PRETTY_FLATPAK_BIN
 scripts/build-flatpak.sh
-# dist/pretty-0.2.1-x86_64.flatpak
-flatpak install --user ./dist/pretty-0.2.1-x86_64.flatpak
+# dist/pretty-0.2.2-x86_64.flatpak
+flatpak install --user ./dist/pretty-0.2.2-x86_64.flatpak
 flatpak run io.github.mappingAu.Pretty
 ```
 
 The app uses `org.freedesktop.Platform//25.08`, Wayland/X11 fallback, DRIs,
 home access, network access and notifications. A Noto CJK face is bundled because the
 freedesktop runtime does not ship one. The Flatpak build is a packaging-only
-check; it was not installed or launched. It was **not rebuilt for the v0.2.0
-pre-release** because `flatpak-builder` is unavailable on the release host.
+check; it was not installed or launched. It was **not rebuilt for this release**
+because `flatpak-builder` is unavailable on the release host.
 
 ## Build
 
@@ -197,12 +200,12 @@ The binary is `target/release/pretty`. Backend features are platform-specific:
 # Linux (default): Vulkan + OpenGL ES
 cargo build --release -p pretty-app
 
-# Windows (native MSVC build, from Windows): Direct3D 12 + Vulkan/GLES fallback
-cargo build --release -p pretty-app --features dx
+# Windows (native MSVC build, from Windows): Vulkan + Direct3D 12, no GLES
+cargo build --release -p pretty-app --no-default-features --features vulkan,dx
 # then: scripts/build-windows.sh   -> dist/pretty-<ver>-windows-x86_64.zip
 
-# macOS (native build, from macOS): Metal + Vulkan (MoltenVK) fallback
-cargo build --release -p pretty-app --features metal
+# macOS (native build, from macOS): Vulkan (MoltenVK) + Metal, no GLES
+cargo build --release -p pretty-app --no-default-features --features vulkan,metal
 # then: scripts/build-macos.sh     -> dist/pretty-<ver>-macos-<arch>.app.tar.gz
 
 # Android: compile-only check, no APK is built
@@ -236,7 +239,7 @@ scripts/build-packages.sh
 ./target/release/pretty                     # auto: platform-native backend first
 ./target/release/pretty --print-info        # compiled backends, auto order, adapters
 PRETTY_RENDERER=vulkan ./target/release/pretty
-PRETTY_RENDERER=gles   ./target/release/pretty
+PRETTY_RENDERER=gles   ./target/release/pretty   # Linux/macOS; not on Windows
 
 # Native backend of the Windows build:
 pretty.exe --renderer dx
@@ -253,7 +256,13 @@ exists, startup fails with the exact reason for every candidate.
 
 ### GLES note
 
-wgpu's GL backend prefers desktop OpenGL when EGL advertises it. The repository
+**Windows:** the GLES backend is disabled in 0.2.2. Selecting it crashed and
+persisted a `renderer = "gles"` value that made every later launch fail
+([issue #1](https://github.com/mappingAu/pretty/issues/1)). Windows release
+builds do not compile it, the settings UI no longer offers it, and an old
+config value is normalised to `auto`.
+
+On Linux, wgpu's GL backend prefers desktop OpenGL when EGL advertises it. The repository
 vendors a small `wgpu-hal` patch (`vendor/wgpu-hal`) that makes the backend create
 an **actual `EGL_OPENGL_ES_API` context** when Pretty requests GLES. This is why
 the driver string in the logs is `OpenGL ES 3.2 ...`. Pretty validates that the
@@ -283,7 +292,7 @@ theme-preset list and kitty.conf mapping table are in
 [docs/CONFIG.md](docs/CONFIG.md).
 
 ```toml
-renderer = "auto"          # auto | vulkan | gles | metal (macOS) | dx (Windows)
+renderer = "auto"          # auto | vulkan | gles (Linux/macOS) | metal (macOS) | dx (Windows)
 font_family = "JetBrains Mono"
 font_size = 15.0
 line_height = 1.18
@@ -410,9 +419,9 @@ point; it is not a mock.
 
 `scripts/build-packages.sh` produces:
 
-- `dist/pretty-terminal_0.2.1_amd64.deb`
-- `dist/pretty-terminal-0.2.1-1.fc44.x86_64.rpm`
-- `dist/pretty-0.2.1-linux-x86_64.tar.gz`
+- `dist/pretty-terminal_0.2.2_amd64.deb`
+- `dist/pretty-terminal-0.2.2-1.fc44.x86_64.rpm`
+- `dist/pretty-0.2.2-linux-x86_64.tar.gz`
 
 All contain the binary, desktop entry, icons, man page and `TERM=pretty` terminfo
 entry. The deb/rpm packages install under `/usr`; the tarball is relocatable and
@@ -444,6 +453,7 @@ run (not to a GitHub release).
 - [Known issues](docs/KNOWN-ISSUES.md)
 - [Cross-platform status and prerequisites](docs/CROSS-PLATFORM.md)
 - [Cross-compile report](docs/CROSS-COMPILE.md)
+- [v0.2.2 platform feature report](docs/TEST-REPORT-V0.2.2.md)
 - [v0.2.1 fix and verification report](docs/TEST-REPORT-V0.2.1.md)
 - [v0.2.0 QA and test report](docs/TEST-REPORT-V0.2.0.md)
 - [0.2.0 core/UX audit](docs/AUDIT-020.md)
