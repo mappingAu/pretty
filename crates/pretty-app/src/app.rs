@@ -30,6 +30,51 @@ use crate::menu::{self, ContextAction};
 use crate::platform;
 use crate::settings::{self, RuntimeInfo, SettingsState};
 
+/// Window/taskbar icon embedded from the installed icon set. Wayland clients
+/// cannot set a raw icon; there the compositor resolves it from the desktop
+/// file matching the application id (see `with_wayland_app_id`). X11 and
+/// Windows still need the bitmap, and winit ignores this call on Wayland.
+const APP_ICON_PNG: &[u8] = include_bytes!("../../../icons/pretty-128.png");
+
+fn app_icon() -> Option<winit::window::Icon> {
+    let image = image::load_from_memory(APP_ICON_PNG).ok()?.into_rgba8();
+    let (width, height) = image.dimensions();
+    winit::window::Icon::from_rgba(image.into_raw(), width, height).ok()
+}
+
+/// The name shown before the "— Pretty" suffix until the shell/program sets a
+/// window title of its own. The old fallback was "Pretty", which produced the
+/// confusing "Pretty — Pretty" window title and a tab labelled "1: Pretty".
+fn program_title(shell: &str) -> String {
+    let shell = if shell.trim().is_empty() {
+        crate::config::default_shell()
+    } else {
+        shell.to_owned()
+    };
+    std::path::Path::new(&shell)
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("Terminal")
+        .to_owned()
+}
+
+/// Give the Wayland surface a real `app_id` so KWin can match it to
+/// `pretty.desktop` and draw Pretty's icon instead of the generic Wayland
+/// client icon. Flatpak exports its application id through `FLATPAK_ID`; the
+/// desktop file inside the sandbox uses that name.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+fn with_wayland_app_id(
+    attrs: winit::window::WindowAttributes,
+) -> winit::window::WindowAttributes {
+    use winit::platform::wayland::WindowAttributesExtWayland;
+
+    let app_id = std::env::var("PRETTY_APP_ID")
+        .or_else(|_| std::env::var("FLATPAK_ID"))
+        .unwrap_or_else(|_| "pretty".to_owned());
+    attrs.with_name(app_id.clone(), app_id)
+}
+
 #[derive(Clone, Debug)]
 pub enum UserEvent {
     PtyReady(PaneId),
@@ -328,6 +373,12 @@ pub struct PrettyApp {
     drop_hover: Option<PathBuf>,
     ime_preedit: String,
     ime_cursor: Option<egui::Pos2>,
+    /// Last physical rectangle passed to `set_ime_cursor_area`. Re-sending the
+    /// same rectangle every frame makes KWin/Fcitx acknowledge it with an
+    /// empty preedit event, which requests another redraw: an idle terminal
+    /// then repaints at the compositor refresh rate forever. That feedback
+    /// loop is also the source of the flicker in the fullscreen title bar.
+    ime_area: Option<(f64, f64, u32, u32)>,
     /// Last time the pointer moved/clicked, for `mouse_hide_wait`.
     last_pointer_activity: Instant,
     /// Whether the OS pointer is currently hidden by the idle timer.
@@ -429,6 +480,7 @@ impl PrettyApp {
             drop_hover: None,
             ime_preedit: String::new(),
             ime_cursor: None,
+            ime_area: None,
             last_pointer_activity: Instant::now(),
             pointer_hidden: false,
             pending_window_size: None,
@@ -577,7 +629,12 @@ impl PrettyApp {
             || self.config.opacity < 0.999
             || self.config.blur;
         let attrs = Window::default_attributes()
-            .with_title(self.options.title.clone().unwrap_or_else(|| "Pretty".into()))
+            .with_title(
+                self.options
+                    .title
+                    .clone()
+                    .unwrap_or_else(|| program_title(&self.config.shell)),
+            )
             .with_inner_size(LogicalSize::new(
                 self.config.window_width as f64,
                 self.config.window_height as f64,
@@ -585,6 +642,8 @@ impl PrettyApp {
             .with_transparent(transparent_window)
             .with_decorations(!self.config.hide_window_decorations)
             .with_visible(true);
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        let attrs = with_wayland_app_id(attrs);
         let attrs = if self.options.fullscreen {
             attrs.with_fullscreen(Some(Fullscreen::Borderless(None)))
         } else {
@@ -599,6 +658,9 @@ impl PrettyApp {
                 return;
             }
         };
+        // Wayland requires the desktop-file/app-id route above; X11 and
+        // Windows consume the embedded bitmap directly.
+        window.set_window_icon(app_icon());
         self.scale_factor = window.scale_factor();
         self.apply_ui_scale();
         let theme = self.config.theme();
@@ -827,15 +889,21 @@ impl PrettyApp {
             pty,
             pty_rx,
             term_events,
-            title: self
-                .options
-                .title
-                .clone()
-                .unwrap_or_else(|| "Pretty".into()),
+            title: self.default_pane_title(),
             rect,
             cols,
             rows,
         })
+    }
+
+    /// Initial/replacement title for a pane that has not reported one yet.
+    /// `--title` still wins; otherwise the configured shell's program name is
+    /// used ("bash", "zsh", ...), never the terminal's own name.
+    fn default_pane_title(&self) -> String {
+        self.options
+            .title
+            .clone()
+            .unwrap_or_else(|| program_title(&self.config.shell))
     }
 
     fn resize_all(&mut self) {
@@ -868,10 +936,16 @@ impl PrettyApp {
         let title = self
             .panes
             .get(&self.focused)
-            .map(|p| p.title.as_str())
+            .map(|p| p.title.trim())
             .filter(|t| !t.is_empty())
             .unwrap_or("Pretty");
-        window.set_title(&format!("{title} — Pretty"));
+        // Never make the window title repeat the application name: the old
+        // fallback title "Pretty" produced "Pretty — Pretty".
+        if title == "Pretty" {
+            window.set_title("Pretty");
+        } else {
+            window.set_title(&format!("{title} — Pretty"));
+        }
     }
 
     fn focused_pane_mut(&mut self) -> Option<&mut Pane> {
@@ -1560,8 +1634,9 @@ impl PrettyApp {
                     }
                 }
                 TerminalEvent::ResetTitle => {
+                    let fallback = self.default_pane_title();
                     if let Some(pane) = self.panes.get_mut(&id) {
-                        pane.title = "Pretty".into();
+                        pane.title = fallback;
                     }
                     if self.focused == id {
                         self.update_title();
@@ -2227,16 +2302,19 @@ impl PrettyApp {
         // cursor put the IME popup in the wrong corner of the window.
         if self.settings.open || self.search.open {
             self.ime_cursor = None;
+            self.ime_area = None;
             return;
         }
         let Some(window) = &self.window else { return };
         let Some(renderer) = &self.renderer else { return };
         let Some((rect, _, frame)) = frames.iter().find(|(_, id, _)| *id == self.focused) else {
             self.ime_cursor = None;
+            self.ime_area = None;
             return;
         };
         let Some(cursor) = frame.cursor.filter(|c| c.visible) else {
             self.ime_cursor = None;
+            self.ime_area = None;
             return;
         };
         let metrics = renderer.cell_metrics();
@@ -2248,9 +2326,19 @@ impl PrettyApp {
         let y = rect.y + padding + cursor.row as f32 * metrics.cell_h;
         let ppp = self.ui_ppp();
         self.ime_cursor = Some(egui::pos2(x / ppp, y / ppp));
+        let area = (
+            x as f64,
+            y as f64,
+            metrics.cell_w.max(1.0) as u32,
+            metrics.cell_h.max(1.0) as u32,
+        );
+        if self.ime_area == Some(area) {
+            return;
+        }
+        self.ime_area = Some(area);
         window.set_ime_cursor_area(
-            PhysicalPosition::new(x as f64, y as f64),
-            PhysicalSize::new(metrics.cell_w.max(1.0) as u32, metrics.cell_h.max(1.0) as u32),
+            PhysicalPosition::new(area.0, area.1),
+            PhysicalSize::new(area.2, area.3),
         );
     }
 
@@ -2364,8 +2452,14 @@ impl PrettyApp {
         let window_size = window.inner_size();
         let window_width_points = window_size.width as f32 / ppp;
         let window_height_points = window_size.height as f32 / ppp;
-        let tab_bar_width = (window_width_points - 132.0).max(240.0);
         let tab_bar_bottom = self.config.tab_bar_edge == "bottom";
+        let (chrome, tab_bar_width) = chrome_layout(
+            window_width_points,
+            margin_points,
+            tab_bar_height_points,
+            tab_bar_visible,
+            tab_bar_bottom,
+        );
         let tab_bar_top = if tab_bar_bottom {
             (window_height_points - margin_points - tab_bar_height_points).max(margin_points)
         } else {
@@ -2456,6 +2550,7 @@ impl PrettyApp {
                     &info,
                     env!("CARGO_PKG_VERSION"),
                     lang,
+                    chrome,
                 );
                 changed = outcome.changed;
                 reset_request = outcome.reset;
@@ -2773,6 +2868,31 @@ impl PrettyApp {
         }
         self.pending_ui_apply = false;
     }
+
+    /// Tear down clipboard integrations while winit's window/display are still
+    /// alive. `egui-winit` implements the Wayland clipboard with a worker
+    /// thread that shares winit's `wl_display`; destroying the window first
+    /// and letting that worker clean up afterwards corrupts the display's
+    /// proxy map and segfaults just after a normal window close (KDE reported
+    /// every close as a crash). The struct fields are dropped in declaration
+    /// order, which puts `window` before `egui_state`, so this has to happen
+    /// explicitly rather than relying on field drop order.
+    fn shutdown_clipboard(&mut self) {
+        self.egui_state = None;
+        #[cfg(not(target_os = "android"))]
+        {
+            self.clipboard = None;
+        }
+    }
+}
+
+impl Drop for PrettyApp {
+    fn drop(&mut self) {
+        // Covers renderer-creation failures and other paths that never reach
+        // `ApplicationHandler::exiting`; harmless (both options are None)
+        // after the normal shutdown path already ran.
+        self.shutdown_clipboard();
+    }
 }
 
 impl ApplicationHandler<UserEvent> for PrettyApp {
@@ -3041,6 +3161,7 @@ impl ApplicationHandler<UserEvent> for PrettyApp {
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         self.blink_thread_stop.store(true, Ordering::Relaxed);
+        self.shutdown_clipboard();
         if self.config.remember_window_size {
             if let Some((width, height)) = self.pending_window_size.take() {
                 if width != self.config.window_width || height != self.config.window_height {
@@ -3322,6 +3443,46 @@ impl TabBarColors {
     }
 }
 
+/// Width of the tab-bar frame's non-content part: 4 points of inner margin
+/// and 1 point of stroke on each side. The terminal frame has no such padding,
+/// so it is subtracted when the chrome row is aligned to the terminal margin.
+const TAB_BAR_FRAME_INSET: f32 = 10.0;
+
+/// Lay out the custom title-bar row so every line follows the terminal's main
+/// frame: the tab bar starts at the left margin, the settings button ends at
+/// the right margin, both share the same top and bottom, and a margin-sized
+/// gap separates them. Previously the settings button was anchored 12/10
+/// points from the top-right while the tab bar sat at 6/6, so their bottom
+/// lines missed each other by four points.
+fn chrome_layout(
+    window_width_points: f32,
+    margin_points: f32,
+    tab_bar_height_points: f32,
+    tab_bar_visible: bool,
+    tab_bar_bottom: bool,
+) -> (settings::ChromeMetrics, f32) {
+    let chrome = settings::ChromeMetrics {
+        top: margin_points,
+        // The button only mirrors the tab bar's height while the bar is at the
+        // top; with a bottom bar it keeps the default height at the top edge.
+        height: if tab_bar_visible && !tab_bar_bottom {
+            tab_bar_height_points
+        } else {
+            settings::ChromeMetrics::default().height
+        },
+        right_margin: margin_points,
+        button_width: 104.0,
+    };
+    // x = margin | tab bar | margin | button | margin
+    let tab_bar_width = (window_width_points
+        - margin_points * 2.0
+        - chrome.button_width
+        - margin_points
+        - TAB_BAR_FRAME_INSET)
+        .max(240.0);
+    (chrome, tab_bar_width)
+}
+
 /// Build a tab label from a kitty-style template.
 ///
 /// Supported placeholders are `{index}` (1-based, matching the tab bar
@@ -3374,6 +3535,7 @@ fn show_tab_bar(
         .show(ctx, |ui| {
             let mut frame = egui::Frame::new()
                 .fill(colors.background)
+                .corner_radius(egui::CornerRadius::same(settings::CHROME_CORNER_RADIUS))
                 .inner_margin(egui::Margin::symmetric(4, 2));
             match style {
                 "fade" => {
@@ -3388,7 +3550,14 @@ fn show_tab_bar(
             }
             frame.show(ui, |ui| {
                 ui.set_width(width);
-                ui.set_min_height((height - 6.0).max(16.0));
+                // The frame adds 4 points of inner margin and 2 points of
+                // stroke around this content box. Keep the content at exactly
+                // height-6 so the outer frame ends on the terminal's top line:
+                // egui's default button padding made the row 3 points taller,
+                // which pushed the tab bar over the pane border.
+                let content_height = (height - 6.0).max(16.0);
+                ui.set_height(content_height);
+                ui.spacing_mut().button_padding.y = 3.0;
                 let mut draw_tabs = |ui: &mut egui::Ui| {
                     for (i, label) in labels.iter().enumerate() {
                         let is_active = i == active;
@@ -3397,6 +3566,9 @@ fn show_tab_bar(
                         );
                         let mut button = egui::Button::new(text)
                             .min_size(egui::vec2(0.0, (height - 12.0).max(16.0)))
+                            .corner_radius(egui::CornerRadius::same(
+                                settings::CHROME_CORNER_RADIUS,
+                            ))
                             .fill(if is_active {
                                 colors.active_bg
                             } else {
@@ -3438,9 +3610,14 @@ fn show_tab_bar(
                         format!("{} ({new_tab_hint})", tr(lang, "New tab"))
                     };
                     if ui
-                        .add(egui::Button::new(
-                            egui::RichText::new("+").color(colors.inactive_fg),
-                        ))
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new("+").color(colors.inactive_fg),
+                            )
+                            .corner_radius(egui::CornerRadius::same(
+                                settings::CHROME_CORNER_RADIUS,
+                            )),
+                        )
                         .on_hover_text(new_tab_text)
                         .clicked()
                     {
@@ -3452,9 +3629,15 @@ fn show_tab_bar(
                         format!("{} ({find_hint})", tr(lang, "Find"))
                     };
                     if ui
-                        .add(egui::Button::new(
-                            egui::RichText::new(tr(lang, "Find")).color(colors.inactive_fg),
-                        ))
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new(tr(lang, "Find"))
+                                    .color(colors.inactive_fg),
+                            )
+                            .corner_radius(egui::CornerRadius::same(
+                                settings::CHROME_CORNER_RADIUS,
+                            )),
+                        )
                         .on_hover_text(find_text)
                         .clicked()
                     {
@@ -3614,7 +3797,7 @@ fn install_ui_font(ctx: &egui::Context) {
 
 #[cfg(test)]
 mod tests {
-    use super::{shell_quote_path, Shortcut};
+    use super::{chrome_layout, program_title, shell_quote_path, Shortcut};
 
     // POSIX single-quote quoting; Windows has its own CommandLineToArgvW
     // test below and uses double quotes.
@@ -3639,6 +3822,37 @@ mod tests {
         assert_eq!(shell_quote_path(r#"C:\a"b.txt"#).as_deref(), Some(r#""C:\a\"b.txt""#));
         // cmd.exe variable expansion has no escape: refuse rather than inject.
         assert_eq!(shell_quote_path(r"C:\%COMSPEC%.txt"), None);
+    }
+
+    #[test]
+    fn fallback_title_is_the_program_not_the_terminal_name() {
+        assert_eq!(program_title("/usr/bin/bash"), "bash");
+        assert_eq!(program_title("zsh"), "zsh");
+        assert_eq!(program_title("/usr/bin/fish"), "fish");
+    }
+
+    #[test]
+    fn chrome_row_follows_the_terminal_frame_lines() {
+        let margin = 6.0;
+        let tab_height = 30.0;
+        let window = 1920.0;
+        let (chrome, tab_bar_content_width) =
+            chrome_layout(window, margin, tab_height, true, false);
+
+        // The settings button shares the tab bar's top and bottom lines, which
+        // are also the terminal's top frame line (margin + tab height).
+        assert_eq!(chrome.top, margin);
+        assert_eq!(chrome.height, tab_height);
+        assert_eq!(chrome.top + chrome.height, margin + tab_height);
+
+        // Its right edge is exactly the terminal's right frame margin.
+        assert_eq!(window - chrome.right_margin, window - margin);
+
+        // A margin-sized gap separates the tab bar's outer right edge from the
+        // settings button; the frame adds its padding/stroke outside content.
+        let tab_bar_outer_right = margin + tab_bar_content_width + super::TAB_BAR_FRAME_INSET;
+        let settings_left = window - chrome.right_margin - chrome.button_width;
+        assert_eq!(settings_left - tab_bar_outer_right, margin);
     }
 
     #[test]

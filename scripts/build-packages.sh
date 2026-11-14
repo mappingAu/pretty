@@ -45,7 +45,7 @@ for size in 16 24 32 48 64 128 256 512; do
   install -m 0644 "icons/pretty-${size}.png" "$STAGE/usr/share/icons/hicolor/${size}x${size}/apps/pretty.png"
 done
 install -m 0644 README.md "$STAGE/usr/share/doc/pretty/README.md"
-for doc in KITTY-COMPAT.md TEST-REPORT.md RENDERER.md ARCHITECTURE.md KNOWN-ISSUES.md PACKAGING.md CONFIG.md CROSS-PLATFORM.md CROSS-COMPILE.md TEST-REPORT-V0.2.0.md AUDIT-020.md; do
+for doc in KITTY-COMPAT.md TEST-REPORT.md RENDERER.md ARCHITECTURE.md KNOWN-ISSUES.md PACKAGING.md CONFIG.md CROSS-PLATFORM.md CROSS-COMPILE.md TEST-REPORT-V0.2.0.md TEST-REPORT-V0.2.1.md AUDIT-020.md; do
   install -m 0644 "docs/$doc" "$STAGE/usr/share/doc/pretty/$doc"
 done
 cp -a assets/licenses/. "$STAGE/usr/share/doc/pretty/licenses/"
@@ -78,7 +78,7 @@ TARROOT="$BUILD/pretty-$VERSION-linux-x86_64"
 mkdir -p "$TARROOT"
 cp -a "$STAGE/usr" "$TARROOT/"
 mkdir -p "$TARROOT/docs/licenses"
-for doc in KITTY-COMPAT.md TEST-REPORT.md RENDERER.md ARCHITECTURE.md KNOWN-ISSUES.md PACKAGING.md CONFIG.md CROSS-PLATFORM.md CROSS-COMPILE.md TEST-REPORT-V0.2.0.md AUDIT-020.md; do cp "docs/$doc" "$TARROOT/docs/$doc"; done
+for doc in KITTY-COMPAT.md TEST-REPORT.md RENDERER.md ARCHITECTURE.md KNOWN-ISSUES.md PACKAGING.md CONFIG.md CROSS-PLATFORM.md CROSS-COMPILE.md TEST-REPORT-V0.2.0.md TEST-REPORT-V0.2.1.md AUDIT-020.md; do cp "docs/$doc" "$TARROOT/docs/$doc"; done
 cp README.md "$TARROOT/docs/README.md"
 cp -a assets/licenses/. "$TARROOT/docs/licenses/"
 cp LICENSE "$TARROOT/"

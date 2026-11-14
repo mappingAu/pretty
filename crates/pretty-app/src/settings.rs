@@ -81,6 +81,32 @@ pub struct SettingsOutcome {
     pub reset: bool,
 }
 
+/// Radius of every box in the terminal chrome. The settings button is the
+/// reference: the tab-bar frame and its buttons use the same radius instead of
+/// mixing square frames with rounded buttons.
+pub const CHROME_CORNER_RADIUS: u8 = 6;
+
+/// Geometry of the settings button, shared with the tab bar so their frames
+/// share the same top and bottom lines and the terminal's main frame.
+#[derive(Clone, Copy, Debug)]
+pub struct ChromeMetrics {
+    pub top: f32,
+    pub height: f32,
+    pub right_margin: f32,
+    pub button_width: f32,
+}
+
+impl Default for ChromeMetrics {
+    fn default() -> Self {
+        Self {
+            top: 6.0,
+            height: 30.0,
+            right_margin: 6.0,
+            button_width: 104.0,
+        }
+    }
+}
+
 fn screen_metrics(ctx: &egui::Context) -> egui::Rect {
     let screen = ctx.content_rect();
     if screen.width().is_finite() && screen.width() > 0.0 {
@@ -97,6 +123,7 @@ pub fn show(
     info: &RuntimeInfo<'_>,
     version: &str,
     lang: Lang,
+    chrome: ChromeMetrics,
 ) -> SettingsOutcome {
     apply_style(ctx, &state.draft);
     let mut outcome = SettingsOutcome::default();
@@ -106,10 +133,14 @@ pub fn show(
     if !state.open {
         egui::Area::new(egui::Id::new("pretty-gear"))
             .order(egui::Order::Foreground)
-            .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-12.0, 10.0))
+            .anchor(
+                egui::Align2::RIGHT_TOP,
+                egui::vec2(-chrome.right_margin, chrome.top),
+            )
             .show(ctx, |ui| {
                 let button = egui::Button::new(egui::RichText::new(tr(lang, "Settings")).size(13.0))
-                    .min_size(egui::vec2(104.0, 30.0))
+                    .min_size(egui::vec2(chrome.button_width, chrome.height))
+                    .corner_radius(egui::CornerRadius::same(CHROME_CORNER_RADIUS))
                     .fill(Color32::from_rgba_unmultiplied(20, 26, 36, 230))
                     .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(90, 110, 140)));
                 if ui

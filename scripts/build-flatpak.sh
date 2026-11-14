@@ -34,7 +34,7 @@ install -m 0644 packaging/pretty.1.gz "$BUILD/files/share/man/man1/pretty.1.gz"
 tic -x -o "$BUILD/files/share/terminfo" packaging/pretty.terminfo
 install -m 0644 packaging/flatpak/fonts.conf "$BUILD/files/etc/fonts/fonts.conf"
 install -m 0644 README.md LICENSE "$BUILD/files/share/doc/pretty/"
-for doc in KITTY-COMPAT.md TEST-REPORT.md RENDERER.md ARCHITECTURE.md KNOWN-ISSUES.md PACKAGING.md CONFIG.md CROSS-PLATFORM.md CROSS-COMPILE.md TEST-REPORT-V0.2.0.md AUDIT-020.md; do
+for doc in KITTY-COMPAT.md TEST-REPORT.md RENDERER.md ARCHITECTURE.md KNOWN-ISSUES.md PACKAGING.md CONFIG.md CROSS-PLATFORM.md CROSS-COMPILE.md TEST-REPORT-V0.2.0.md TEST-REPORT-V0.2.1.md AUDIT-020.md; do
   install -m 0644 "docs/$doc" "$BUILD/files/share/doc/pretty/$doc"
 done
 cp -a assets/licenses/. "$BUILD/files/share/doc/pretty/licenses/"

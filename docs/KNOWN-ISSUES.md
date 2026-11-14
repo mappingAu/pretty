@@ -3,6 +3,21 @@
 This file is intentionally explicit. The project does not silently downgrade a
 renderer or represent a compile-only stub as a supported platform.
 
+## Resolved in 0.2.1
+
+- Normal window close no longer segfaults: the egui/Smithay Wayland clipboard
+  worker is now dropped before the window and its `wl_display` proxies. KDE no
+  longer files a crash report for a normal close.
+- The custom title bar follows the terminal frame: the tab bar and settings
+  button share the terminal's top line, bottom line and right margin, and all
+  chrome boxes use the settings button's 6-point corner radius.
+- The Wayland `app_id` and window icon are set explicitly, and the initial
+  pane/window title uses the shell/program name instead of repeating
+  `Pretty`.
+- The idle IME cursor-area feedback loop (an empty preedit event requesting a
+  new frame, at compositor refresh rate) is gone; the fullscreen title bar no
+  longer repaints continuously. See `docs/TEST-REPORT-V0.2.1.md`.
+
 ## UX follow-up gaps
 
 - **Touch was verified with synthetic XInput2/uinput injection on this host's
