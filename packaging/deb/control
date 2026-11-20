@@ -1,5 +1,5 @@
 Package: pretty-terminal
-Version: 0.2.2
+Version: 0.2.3
 Section: x11
 Priority: optional
 Architecture: amd64

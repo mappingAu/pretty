@@ -23,6 +23,12 @@ use winit::keyboard::{Key as WinitKey, ModifiersState, NamedKey as WinitNamedKey
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 use winit::window::{Fullscreen, Window, WindowId};
+#[cfg(target_os = "linux")]
+use std::io::IsTerminal;
+#[cfg(target_os = "linux")]
+use winit::platform::startup_notify::{
+    reset_activation_token_env, EventLoopExtStartupNotify, WindowAttributesExtStartupNotify,
+};
 
 use crate::config::Config;
 use crate::i18n::{tr, Lang};
@@ -82,6 +88,9 @@ pub enum UserEvent {
     /// `about_to_wait` while input events keep arriving, so a control-flow
     /// deadline alone is not enough to keep the cursor blinking.
     BlinkTick,
+    /// A Wayland drag-and-drop worker has pending events.
+    #[cfg(target_os = "linux")]
+    DndWake,
 }
 
 /// Cursor blink phase driven by wall-clock deadlines.
@@ -371,6 +380,14 @@ pub struct PrettyApp {
     search: SearchState,
     exit_requested: bool,
     drop_hover: Option<PathBuf>,
+    /// A file drag is over the window (Wayland only; winit 0.30 does not
+    /// implement data-device drag events on Wayland).
+    #[cfg(target_os = "linux")]
+    dnd_hover: bool,
+    /// Native Wayland file-drop bridge. Dropped before the window in
+    /// `shutdown_clipboard`, same as the clipboard worker.
+    #[cfg(target_os = "linux")]
+    dnd: Option<guth_wayland_dnd::FileDnd>,
     ime_preedit: String,
     ime_cursor: Option<egui::Pos2>,
     /// Last physical rectangle passed to `set_ime_cursor_area`. Re-sending the
@@ -478,6 +495,10 @@ impl PrettyApp {
             search: SearchState::default(),
             exit_requested: false,
             drop_hover: None,
+            #[cfg(target_os = "linux")]
+            dnd_hover: false,
+            #[cfg(target_os = "linux")]
+            dnd: None,
             ime_preedit: String::new(),
             ime_cursor: None,
             ime_area: None,
@@ -628,6 +649,19 @@ impl PrettyApp {
         let transparent_window = self.options.renderer == RendererKind::Gles
             || self.config.opacity < 0.999
             || self.config.blur;
+        // A .desktop launcher passes XDG_ACTIVATION_TOKEN/DESKTOP_STARTUP_ID so
+        // the compositor can focus and raise the new window. Winit only uses
+        // the token when it is given explicitly; without it KDE shows a
+        // startup delay and the window may stay behind other windows.
+        #[cfg(target_os = "linux")]
+        let activation_token = event_loop.read_token_from_env();
+        #[cfg(target_os = "linux")]
+        let had_activation_token = activation_token.is_some();
+        #[cfg(target_os = "linux")]
+        log::info!(
+            "startup activation token: {}",
+            if had_activation_token { "present" } else { "absent" }
+        );
         let attrs = Window::default_attributes()
             .with_title(
                 self.options
@@ -644,6 +678,12 @@ impl PrettyApp {
             .with_visible(true);
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         let attrs = with_wayland_app_id(attrs);
+        #[cfg(target_os = "linux")]
+        let attrs = if let Some(token) = activation_token {
+            attrs.with_activation_token(token)
+        } else {
+            attrs
+        };
         let attrs = if self.options.fullscreen {
             attrs.with_fullscreen(Some(Fullscreen::Borderless(None)))
         } else {
@@ -661,6 +701,35 @@ impl PrettyApp {
         // Wayland requires the desktop-file/app-id route above; X11 and
         // Windows consume the embedded bitmap directly.
         window.set_window_icon(app_icon());
+        // The token has been applied to this window. Do not leak it into the
+        // shell/processes started in the terminal.
+        #[cfg(target_os = "linux")]
+        reset_activation_token_env();
+        // Desktop launchers normally pass an activation token. When they do
+        // not (observed with KDE's systemd application launcher), ask the
+        // compositor for xdg_activation attention after mapping instead of
+        // silently opening behind the current window.
+        #[cfg(target_os = "linux")]
+        if !had_activation_token && !std::io::stdin().is_terminal() {
+            window.request_user_attention(Some(winit::window::UserAttentionType::Informational));
+            log::info!("no launcher activation token; requested xdg_activation attention");
+        }
+        // winit 0.30 has no Wayland data-device implementation, so native
+        // Wayland windows never receive DroppedFile/HoveredFile. Attach a
+        // second queue to the same wl_display for file drops (X11 returns
+        // None and keeps using winit's own XDND events).
+        #[cfg(target_os = "linux")]
+        {
+            let proxy = self.proxy.clone();
+            self.dnd = guth_wayland_dnd::FileDnd::attach(&*window, move || {
+                let _ = proxy.send_event(UserEvent::DndWake);
+            });
+            if self.dnd.is_some() {
+                log::info!("Wayland file drag-and-drop bridge enabled");
+            } else {
+                log::debug!("no native Wayland file drag-and-drop bridge on this backend");
+            }
+        }
         self.scale_factor = window.scale_factor();
         self.apply_ui_scale();
         let theme = self.config.theme();
@@ -2252,18 +2321,62 @@ impl PrettyApp {
         }
     }
 
+    /// Drain native Wayland drag events. winit 0.30 does not implement the
+    /// Wayland data-device protocol, so these arrive through the second
+    /// event queue attached by `guth_wayland_dnd` rather than through
+    /// `WindowEvent::DroppedFile`.
+    #[cfg(target_os = "linux")]
+    fn handle_dnd_wake(&mut self) {
+        let mut dropped = Vec::new();
+        let mut hovered = false;
+        let mut left = false;
+        if let Some(dnd) = &self.dnd {
+            for event in dnd.poll() {
+                match event {
+                    guth_wayland_dnd::DndEvent::Hovered { .. } => hovered = true,
+                    guth_wayland_dnd::DndEvent::Left => left = true,
+                    guth_wayland_dnd::DndEvent::Dropped { paths, .. } => {
+                        dropped.extend(paths);
+                    }
+                    guth_wayland_dnd::DndEvent::DragEnded { .. } => {}
+                }
+            }
+        }
+        if hovered && !self.settings.open && !self.search.open {
+            self.dnd_hover = true;
+            if let Some(w) = &self.window {
+                w.set_cursor(winit::window::CursorIcon::Copy);
+            }
+        }
+        if left {
+            self.dnd_hover = false;
+            if let Some(w) = &self.window {
+                w.set_cursor(winit::window::CursorIcon::Text);
+            }
+        }
+        if !dropped.is_empty() {
+            self.dnd_hover = false;
+            self.drop_hover = None;
+            for path in dropped {
+                self.handle_file_drop(path);
+            }
+        }
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
     fn handle_file_drop(&mut self, path: PathBuf) {
         if self.settings.open || self.search.open {
             return;
         }
         let path_text = path.to_string_lossy();
-        let Some(quoted) = shell_quote_path(&path_text) else {
+        let Some(text) = file_drop_text(&path) else {
             // Windows cmd.exe expands %VAR% even inside double quotes and has
             // no escape for it; inserting such a path could inject expansion.
             log::warn!("refusing to insert a path containing '%' (cmd.exe expansion): {path_text}");
             return;
         };
-        let text = format!("{quoted} ");
         let mode = self.panes.get(&self.focused).map(|p| p.term.mode()).unwrap_or_default();
         self.write_to_focused(&encode_paste(mode, &text));
         log::info!("file drop inserted path: {}", path.display());
@@ -2481,6 +2594,21 @@ impl PrettyApp {
             .unwrap_or(pretty_core::Rgb::new(0x7a, 0xa2, 0xf7));
         let bell_color = egui::Color32::from_rgb(accent.r, accent.g, accent.b);
         let drop_hover = self.drop_hover.clone();
+        #[cfg(target_os = "linux")]
+        let dnd_hover = self.dnd_hover;
+        #[cfg(not(target_os = "linux"))]
+        let dnd_hover = false;
+        let drop_message = if let Some(path) = &drop_hover {
+            Some(format!(
+                "{}: {}",
+                tr(lang, "Drop file to insert its path"),
+                path.display()
+            ))
+        } else if dnd_hover {
+            Some(tr(lang, "Drop file to insert its path").to_owned())
+        } else {
+            None
+        };
         let preedit = self.ime_preedit.clone();
         let ime_cursor = self.ime_cursor;
         let confirm_dialog_open = self.confirm_close_dialog;
@@ -2560,7 +2688,7 @@ impl PrettyApp {
                     menu_action =
                         menu::show(root.ctx(), &mut menu_open, lang, has_selection, &shortcuts);
                 }
-                if let Some(path) = &drop_hover {
+                if let Some(message) = &drop_message {
                     if !self.settings.open && !confirm_dialog_open {
                         egui::Area::new(egui::Id::new("pretty-drop-hint"))
                             .order(egui::Order::Foreground)
@@ -2569,11 +2697,7 @@ impl PrettyApp {
                                 egui::Frame::popup(ui.style())
                                     .fill(egui::Color32::from_rgb(24, 31, 43))
                                     .show(ui, |ui| {
-                                        ui.label(format!(
-                                            "{}: {}",
-                                            tr(lang, "Drop file to insert its path"),
-                                            path.display()
-                                        ));
+                                        ui.label(message);
                                     });
                             });
                     }
@@ -2878,6 +3002,12 @@ impl PrettyApp {
     /// order, which puts `window` before `egui_state`, so this has to happen
     /// explicitly rather than relying on field drop order.
     fn shutdown_clipboard(&mut self) {
+        // Both workers borrow winit's wl_display; stop and join them before
+        // the window/display proxies are destroyed.
+        #[cfg(target_os = "linux")]
+        {
+            self.dnd = None;
+        }
         self.egui_state = None;
         #[cfg(not(target_os = "android"))]
         {
@@ -2911,6 +3041,8 @@ impl ApplicationHandler<UserEvent> for PrettyApp {
                 }
                 self.update_pointer_visibility();
             }
+            #[cfg(target_os = "linux")]
+            UserEvent::DndWake => self.handle_dnd_wake(),
         }
     }
 
@@ -3290,6 +3422,14 @@ fn egui_cursor_icon(output: &egui::PlatformOutput) -> Option<winit::window::Curs
     })
 }
 
+
+/// Text inserted for a dropped file: a shell-quoted path plus one trailing
+/// space, so multiple drops can be chained. Shared by winit's X11/Windows/
+/// macOS drop events and the native Wayland bridge.
+fn file_drop_text(path: &std::path::Path) -> Option<String> {
+    let path_text = path.to_string_lossy();
+    shell_quote_path(&path_text).map(|quoted| format!("{quoted} "))
+}
 
 fn percent_decode_path(input: &str) -> String {
     let bytes = input.as_bytes();
@@ -3822,6 +3962,23 @@ mod tests {
         assert_eq!(shell_quote_path(r#"C:\a"b.txt"#).as_deref(), Some(r#""C:\a\"b.txt""#));
         // cmd.exe variable expansion has no escape: refuse rather than inject.
         assert_eq!(shell_quote_path(r"C:\%COMSPEC%.txt"), None);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn dropped_file_text_is_shell_quoted_with_a_trailing_space() {
+        assert_eq!(
+            super::file_drop_text(std::path::Path::new("/tmp/a b.txt")).as_deref(),
+            Some("'/tmp/a b.txt' ")
+        );
+        assert_eq!(
+            super::file_drop_text(std::path::Path::new("/tmp/it's.txt")).as_deref(),
+            Some("'/tmp/it'\\''s.txt' ")
+        );
+        assert_eq!(
+            super::file_drop_text(std::path::Path::new("/tmp/plain")).as_deref(),
+            Some("'/tmp/plain' ")
+        );
     }
 
     #[test]

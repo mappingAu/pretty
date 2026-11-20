@@ -1,6 +1,6 @@
 Name:           pretty-terminal
-Version:        0.2.2
-Release:        1%{?dist}
+Version:        0.2.3
+Release:        1
 Summary:        Hardware accelerated, kitty-compatible terminal emulator
 License:        GPL-3.0-or-later
 URL:            https://github.com/mappingAu/pretty
@@ -32,37 +32,43 @@ rm -rf %{buildroot}
 mkdir -p %{buildroot}
 tar -xzf %{SOURCE0} -C %{buildroot} --strip-components=1
 %files
-%{_bindir}/pretty
-%{_datadir}/applications/pretty.desktop
-%{_datadir}/icons/hicolor/scalable/apps/pretty.svg
-%{_datadir}/icons/hicolor/16x16/apps/pretty.png
-%{_datadir}/icons/hicolor/24x24/apps/pretty.png
-%{_datadir}/icons/hicolor/32x32/apps/pretty.png
-%{_datadir}/icons/hicolor/48x48/apps/pretty.png
-%{_datadir}/icons/hicolor/64x64/apps/pretty.png
-%{_datadir}/icons/hicolor/128x128/apps/pretty.png
-%{_datadir}/icons/hicolor/256x256/apps/pretty.png
-%{_datadir}/icons/hicolor/512x512/apps/pretty.png
-%{_datadir}/terminfo/p/pretty
-%{_mandir}/man1/pretty.1.gz
-%{_docdir}/pretty/README.md
-%{_docdir}/pretty/KITTY-COMPAT.md
-%{_docdir}/pretty/TEST-REPORT.md
-%{_docdir}/pretty/RENDERER.md
-%{_docdir}/pretty/ARCHITECTURE.md
-%{_docdir}/pretty/KNOWN-ISSUES.md
-%{_docdir}/pretty/PACKAGING.md
-%{_docdir}/pretty/CONFIG.md
-%{_docdir}/pretty/CROSS-PLATFORM.md
-%{_docdir}/pretty/CROSS-COMPILE.md
-%{_docdir}/pretty/TEST-REPORT-V0.2.0.md
-%{_docdir}/pretty/TEST-REPORT-V0.2.1.md
-%{_docdir}/pretty/TEST-REPORT-V0.2.2.md
-%{_docdir}/pretty/AUDIT-020.md
-%{_docdir}/pretty/LICENSE
-%{_docdir}/pretty/copyright
-%{_docdir}/pretty/licenses
+# Distribution-neutral payload paths: %{_docdir}/%{_datadir}/%{_mandir}
+# depend on the building distribution's macros (e.g. Fedora expands
+# %{_docdir} to /usr/share/doc/pretty-terminal and uses usrmove).
+/usr/bin/pretty
+/usr/share/applications/pretty.desktop
+/usr/share/icons/hicolor/scalable/apps/pretty.svg
+/usr/share/icons/hicolor/16x16/apps/pretty.png
+/usr/share/icons/hicolor/24x24/apps/pretty.png
+/usr/share/icons/hicolor/32x32/apps/pretty.png
+/usr/share/icons/hicolor/48x48/apps/pretty.png
+/usr/share/icons/hicolor/64x64/apps/pretty.png
+/usr/share/icons/hicolor/128x128/apps/pretty.png
+/usr/share/icons/hicolor/256x256/apps/pretty.png
+/usr/share/icons/hicolor/512x512/apps/pretty.png
+/usr/share/terminfo/p/pretty
+/usr/share/man/man1/pretty.1.gz
+/usr/share/doc/pretty/README.md
+/usr/share/doc/pretty/KITTY-COMPAT.md
+/usr/share/doc/pretty/TEST-REPORT.md
+/usr/share/doc/pretty/RENDERER.md
+/usr/share/doc/pretty/ARCHITECTURE.md
+/usr/share/doc/pretty/KNOWN-ISSUES.md
+/usr/share/doc/pretty/PACKAGING.md
+/usr/share/doc/pretty/CONFIG.md
+/usr/share/doc/pretty/CROSS-PLATFORM.md
+/usr/share/doc/pretty/CROSS-COMPILE.md
+/usr/share/doc/pretty/TEST-REPORT-V0.2.0.md
+/usr/share/doc/pretty/TEST-REPORT-V0.2.1.md
+/usr/share/doc/pretty/TEST-REPORT-V0.2.2.md
+/usr/share/doc/pretty/TEST-REPORT-V0.2.3.md
+/usr/share/doc/pretty/AUDIT-020.md
+/usr/share/doc/pretty/LICENSE
+/usr/share/doc/pretty/copyright
+/usr/share/doc/pretty/licenses
 %changelog
+* Fri Nov 20 2026 Pretty Authors <dev@pretty.local> - 0.2.3-1
+- 0.2.3: native Wayland file drops and desktop-launch activation
 * Sat Nov 14 2026 Pretty Authors <dev@pretty.local> - 0.2.2-1
 - 0.2.2: disable GLES on Windows, compile Vulkan on every platform
 * Sat Nov 14 2026 Pretty Authors <dev@pretty.local> - 0.2.1-1

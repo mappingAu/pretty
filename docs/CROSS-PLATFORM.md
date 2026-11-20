@@ -80,7 +80,7 @@ are unit-tested on the host, independent of GPU hardware.
 
 ### Linux / BSD (reference platform)
 
-* Rust stable (workspace `rust-version = "1.89"`; release host used 1.99.1).
+* Rust stable (workspace `rust-version = "1.95"`; release host used 1.99.1).
 * System build dependencies (Fedora names; Debian/Ubuntu equivalents in the CI
   workflow): `pkg-config`, `wayland-devel`, `libxkbcommon-devel`, `libX11-devel`,
   `libxcb-devel`, `mesa-libEGL-devel`, `mesa-libGLES-devel`, `vulkan-loader-devel`,

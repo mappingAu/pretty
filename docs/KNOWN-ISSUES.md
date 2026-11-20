@@ -18,6 +18,18 @@ renderer or represent a compile-only stub as a supported platform.
   new frame, at compositor refresh rate) is gone; the fullscreen title bar no
   longer repaints continuously. See `docs/TEST-REPORT-V0.2.1.md`.
 
+## Resolved in 0.2.3
+
+- Native Wayland file drops now work: winit 0.30 has no Wayland data-device
+  implementation, so Pretty attaches a private Wayland DnD queue
+  (`guth-wayland-dnd`) and funnels `Dropped` paths through the existing
+  shell-quoted insertion path. X11/Windows/macOS keep winit's native events.
+- `.desktop` launch now applies the launcher activation token
+  (`XDG_ACTIVATION_TOKEN` / `DESKTOP_STARTUP_ID`), clears it before spawning
+  the shell, and requests `xdg_activation` attention when a launcher supplies
+  no token. This removes the startup-feedback delay/silence and the occasional
+  failed-launch exit code. See `docs/TEST-REPORT-V0.2.3.md`.
+
 ## Windows GLES backend (disabled in 0.2.2)
 
 - Selecting **GLES** on Windows crashed immediately and persisted
@@ -27,7 +39,8 @@ renderer or represent a compile-only stub as a supported platform.
   feature, `RendererKind::Gles` reports `platform_supported = false`, the
   settings UI does not offer it, and a stale config value is rewritten to
   `auto` with a warning. **Vulkan + Direct3D 12** remain available on Windows.
-  The underlying wgpu/ANGLE crash is deferred to the next version.
+  The underlying wgpu/ANGLE crash is deferred to the next **minor** release
+  (0.3.0).
 
 ## UX follow-up gaps
 
@@ -50,7 +63,8 @@ renderer or represent a compile-only stub as a supported platform.
   a TUI has mouse reporting enabled.
 - **File drag/drop requires an XDG drag source.** Paste converts `file://`
   clipboard URIs, but sources that expose only proprietary formats still need
-  a text/plain fallback from the source application.
+  a text/plain fallback. Native Wayland drags are handled by the private
+  data-device bridge; X11/Windows/macOS use winit''s events.
 - **Very large mpv frames are still decoded synchronously on the UI thread.**
   The image table and GPU cache no longer grow without bound, but 4K/high-FPS
   video can still use significant CPU; a dedicated image worker is future work.
