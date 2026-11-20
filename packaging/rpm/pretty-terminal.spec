@@ -1,5 +1,5 @@
 Name:           pretty-terminal
-Version:        0.2.3
+Version:        0.2.4
 Release:        1
 Summary:        Hardware accelerated, kitty-compatible terminal emulator
 License:        GPL-3.0-or-later
@@ -62,11 +62,14 @@ tar -xzf %{SOURCE0} -C %{buildroot} --strip-components=1
 /usr/share/doc/pretty/TEST-REPORT-V0.2.1.md
 /usr/share/doc/pretty/TEST-REPORT-V0.2.2.md
 /usr/share/doc/pretty/TEST-REPORT-V0.2.3.md
+/usr/share/doc/pretty/TEST-REPORT-V0.2.4.md
 /usr/share/doc/pretty/AUDIT-020.md
 /usr/share/doc/pretty/LICENSE
 /usr/share/doc/pretty/copyright
 /usr/share/doc/pretty/licenses
 %changelog
+* Fri Nov 20 2026 Pretty Authors <dev@pretty.local> - 0.2.4-1
+- 0.2.4: handle Terminal=true terminal-launcher -e command lines
 * Fri Nov 20 2026 Pretty Authors <dev@pretty.local> - 0.2.3-1
 - 0.2.3: native Wayland file drops and desktop-launch activation
 * Sat Nov 14 2026 Pretty Authors <dev@pretty.local> - 0.2.2-1

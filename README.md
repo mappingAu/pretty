@@ -8,7 +8,7 @@ Rust · `wgpu` · Vulkan on every platform (Metal on macOS, Direct3D 12 on Windo
 
 > **Warning**: Part of the code for this project was written by AI (Vibe coding).
 
-[**Download v0.2.3**](https://github.com/mappingAu/pretty/releases/tag/v0.2.3)
+[**Download v0.2.4**](https://github.com/mappingAu/pretty/releases/tag/v0.2.4)
 · [Features](#features)
 · [Install](#install)
 · [Configuration](#configuration)
@@ -184,8 +184,8 @@ A single-file Flatpak bundle is produced by:
 cargo build --release -p pretty-app
 cp target/release/pretty .portable-pretty   # optional; or pass PRETTY_FLATPAK_BIN
 scripts/build-flatpak.sh
-# dist/pretty-0.2.3-x86_64.flatpak
-flatpak install --user ./dist/pretty-0.2.3-x86_64.flatpak
+# dist/pretty-0.2.4-x86_64.flatpak
+flatpak install --user ./dist/pretty-0.2.4-x86_64.flatpak
 flatpak run io.github.mappingAu.Pretty
 ```
 
@@ -268,7 +268,16 @@ PRETTY_RENDERER=gles   ./target/release/pretty   # Linux/macOS; not on Windows
 pretty.exe --renderer dx
 # Native backend of the macOS build:
 ./pretty --renderer metal
+
+# Run one program instead of the login shell (xterm/terminal-launcher form):
+pretty -e htop
+pretty -e sh -c 'make test && exec bash'
 ```
+
+The `-e`/`-x` form consumes the whole remaining command line, so a desktop
+entry with `Terminal=true` works even when Pretty is the default terminal. If
+that entry's command is Pretty itself, the outer window is kept and the nested
+self-launch is ignored.
 
 The selected backend can also be set in the config file. `PRETTY_RENDERER` and
 `--renderer` take precedence. `auto` tries the platform-preferred order and
@@ -311,15 +320,15 @@ rendering claim in this repository.
 ## Install
 
 Prebuilt binaries for every platform are attached to
-[**v0.2.3**](https://github.com/mappingAu/pretty/releases/tag/v0.2.3):
+[**v0.2.4**](https://github.com/mappingAu/pretty/releases/tag/v0.2.4):
 
 | Platform | Asset | Install |
 |---|---|---|
-| Fedora / RHEL / openSUSE (RPM) | `pretty-terminal-0.2.3-1.x86_64.rpm` | `sudo dnf install ./pretty-terminal-0.2.3-1.x86_64.rpm` (or `zypper install`) |
-| Debian / Ubuntu | `pretty-terminal_0.2.3_amd64.deb` | `sudo apt install ./pretty-terminal_0.2.3_amd64.deb` |
-| Any Linux | `pretty-0.2.3-linux-x86_64.tar.gz` | `tar -xzf … && cd pretty-0.2.3-linux-x86_64 && ./install.sh`, or run `./bin/pretty` |
-| Windows 10/11 | `pretty-0.2.3-windows-x86_64.zip` | unzip and run `pretty.exe` (Direct3D 12 or Vulkan) |
-| macOS 11+ (arm64) | `pretty-0.2.3-macos-arm64.app.tar.gz` | unzip, move `Pretty.app` to Applications, run it |
+| Fedora / RHEL / openSUSE (RPM) | `pretty-terminal-0.2.4-1.x86_64.rpm` | `sudo dnf install ./pretty-terminal-0.2.4-1.x86_64.rpm` (or `zypper install`) |
+| Debian / Ubuntu | `pretty-terminal_0.2.4_amd64.deb` | `sudo apt install ./pretty-terminal_0.2.4_amd64.deb` |
+| Any Linux | `pretty-0.2.4-linux-x86_64.tar.gz` | `tar -xzf … && cd pretty-0.2.4-linux-x86_64 && ./install.sh`, or run `./bin/pretty` |
+| Windows 10/11 | `pretty-0.2.4-windows-x86_64.zip` | unzip and run `pretty.exe` (Direct3D 12 or Vulkan) |
+| macOS 11+ (arm64) | `pretty-0.2.4-macos-arm64.app.tar.gz` | unzip, move `Pretty.app` to Applications, run it |
 
 A Vulkan-capable GPU is required; Pretty never falls back to a CPU
 rasterizer. From source:
@@ -471,9 +480,9 @@ point; it is not a mock.
 
 `scripts/build-packages.sh` produces:
 
-- `dist/pretty-terminal_0.2.3_amd64.deb`
-- `dist/pretty-terminal-0.2.3-1.x86_64.rpm`
-- `dist/pretty-0.2.3-linux-x86_64.tar.gz`
+- `dist/pretty-terminal_0.2.4_amd64.deb`
+- `dist/pretty-terminal-0.2.4-1.x86_64.rpm`
+- `dist/pretty-0.2.4-linux-x86_64.tar.gz`
 
 All contain the binary, desktop entry, icons, man page and `TERM=pretty` terminfo
 entry. The deb/rpm packages install under `/usr`; the tarball is relocatable and
@@ -505,6 +514,7 @@ run (not to a GitHub release).
 - [Known issues](docs/KNOWN-ISSUES.md)
 - [Cross-platform status and prerequisites](docs/CROSS-PLATFORM.md)
 - [Cross-compile report](docs/CROSS-COMPILE.md)
+- [v0.2.4 terminal-launcher report](docs/TEST-REPORT-V0.2.4.md)
 - [v0.2.3 file-drop and launch report](docs/TEST-REPORT-V0.2.3.md)
 - [v0.2.1 fix and verification report](docs/TEST-REPORT-V0.2.1.md)
 - [v0.2.0 QA and test report](docs/TEST-REPORT-V0.2.0.md)
@@ -523,9 +533,9 @@ run (not to a GitHub release).
 
 ## About this README
 
-This landing page was rewritten for the v0.2.3 announcement; the original
+This landing page was rewritten for the v0.2.4 announcement; the original
 version is the [`docs/README-original.md`](docs/README-original.md) snapshot, or
-`git show v0.2.3:README.md`.
+`git show v0.2.4:README.md`.
 
 ## License
 

@@ -50,13 +50,46 @@ struct Cli {
 
 #[cfg(not(target_os = "android"))]
 fn parse_args() -> Result<Cli, String> {
+    parse_args_from(std::env::args().skip(1))
+}
+
+#[cfg(not(target_os = "android"))]
+fn parse_args_from<I>(args: I) -> Result<Cli, String>
+where
+    I: IntoIterator<Item = String>,
+{
     let mut cli = Cli::default();
-    let mut args = std::env::args().skip(1);
+    let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         let (key, inline) = match arg.split_once('=') {
             Some((k, v)) => (k.to_owned(), Some(v.to_owned())),
             None => (arg, None),
         };
+        // Terminal emulators are invoked as `TERMINAL -e COMMAND...`
+        // (and historically `-x`). Everything after -e is the command, not
+        // Pretty's own options: KDE's Terminal=true launcher runs
+        // `/usr/bin/pretty -e <Exec...>`, and a single-argument -e used to
+        // leave the command's own flags for Pretty to reject with exit 1.
+        if matches!(key.as_str(), "--command" | "-e" | "-x") {
+            let first = if let Some(value) = inline {
+                value
+            } else {
+                args.next().ok_or_else(|| "--command requires a value".to_owned())?
+            };
+            if is_self_command(&first) {
+                // Terminal=true with Exec=pretty (Pretty is also the default
+                // terminal) would otherwise recurse into a second Pretty
+                // window. The outer window is the requested terminal; ignore
+                // the self-exec and keep parsing the remaining arguments as
+                // Pretty's own options.
+                log::info!("terminal launcher asked Pretty to run itself; ignoring nested launch");
+                continue;
+            }
+            let mut rest = vec![first];
+            rest.extend(args.by_ref());
+            cli.command = Some(join_command_args(&rest)?);
+            break;
+        }
         let mut next = |name: &str| -> Result<String, String> {
             if let Some(v) = inline.clone() {
                 Ok(v)
@@ -67,7 +100,6 @@ fn parse_args() -> Result<Cli, String> {
         match key.as_str() {
             "--config" => cli.config = Some(PathBuf::from(next("--config")?)),
             "--renderer" => cli.renderer = Some(next("--renderer")?),
-            "--command" | "-e" => cli.command = Some(next("--command")?),
             "--font-size" => {
                 cli.font_size = Some(next("--font-size")?.parse().map_err(|_| "invalid --font-size")?)
             }
@@ -91,6 +123,41 @@ fn parse_args() -> Result<Cli, String> {
         }
     }
     Ok(cli)
+}
+
+#[cfg(not(target_os = "android"))]
+fn is_self_command(arg: &str) -> bool {
+    let Some(exe) = std::env::current_exe().ok() else {
+        return false;
+    };
+    let given = PathBuf::from(arg);
+    let same_name = given.file_name().and_then(|name| name.to_str())
+        == exe.file_name().and_then(|name| name.to_str());
+    if !same_name {
+        return false;
+    }
+    if !given.is_absolute() {
+        return true;
+    }
+    match (given.canonicalize(), exe.canonicalize()) {
+        (Ok(given), Ok(exe)) => given == exe,
+        _ => false,
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn join_command_args(args: &[String]) -> Result<String, String> {
+    if args.len() == 1 {
+        return Ok(args[0].clone());
+    }
+    let mut quoted = Vec::with_capacity(args.len());
+    for arg in args {
+        let Some(arg) = crate::app::shell_quote_path(arg) else {
+            return Err("command argument contains '%' (cmd.exe expansion)".to_owned());
+        };
+        quoted.push(arg);
+    }
+    Ok(quoted.join(" "))
 }
 
 #[cfg(not(target_os = "android"))]
@@ -460,5 +527,51 @@ fn main() -> ExitCode {
             log::error!("event loop failed: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(all(test, not(target_os = "android"), not(windows)))]
+mod cli_tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Cli, String> {
+        parse_args_from(args.iter().map(|arg| arg.to_string()))
+    }
+
+    #[test]
+    fn terminal_e_consumes_the_whole_command_line() {
+        let cli = parse(&["-e", "sh", "-c", "echo hi"]).unwrap();
+        assert_eq!(cli.command.as_deref(), Some("'sh' '-c' 'echo hi'"));
+        // -e must not let the command's flags be parsed as Pretty options.
+        let cli = parse(&["-e", "foo", "--bar"]).unwrap();
+        assert_eq!(cli.command.as_deref(), Some("'foo' '--bar'"));
+    }
+
+    #[test]
+    fn terminal_x_is_an_alias_for_e() {
+        let cli = parse(&["-x", "htop"]).unwrap();
+        assert_eq!(cli.command.as_deref(), Some("htop"));
+    }
+
+    #[test]
+    fn one_command_argument_is_kept_as_a_shell_string() {
+        let cli = parse(&["--command", "bash -lc 'echo hi'"]).unwrap();
+        assert_eq!(cli.command.as_deref(), Some("bash -lc 'echo hi'"));
+    }
+
+    #[test]
+    fn terminal_e_requires_a_command() {
+        assert!(parse(&["-e"]).is_err());
+    }
+
+    #[test]
+    fn self_launch_is_detected_and_skipped() {
+        let exe = std::env::current_exe().unwrap();
+        let exe = exe.to_string_lossy().into_owned();
+        let cli = parse(&["--title", "SelfTest", "-e", &exe, "--title", "Ignored"]).unwrap();
+        assert_eq!(cli.command, None);
+        assert_eq!(cli.title.as_deref(), Some("Ignored"));
+        assert!(is_self_command(&exe));
+        assert!(!is_self_command("/bin/sh"));
     }
 }

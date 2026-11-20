@@ -18,17 +18,26 @@ renderer or represent a compile-only stub as a supported platform.
   new frame, at compositor refresh rate) is gone; the fullscreen title bar no
   longer repaints continuously. See `docs/TEST-REPORT-V0.2.1.md`.
 
+## Resolved in 0.2.4
+
+- **`.desktop` with `Terminal=true`** now works when Pretty is the desktop's
+  default terminal. KDE invokes `pretty -e <Exec...>`; `-e`/`-x` now consume
+  the whole remaining command line (instead of one argument and then treating
+  the command's `-c`/flags as Pretty options, which exited 1), and a
+  self-exec (`Exec=pretty`) no longer opens a nested second Pretty window.
+  See `docs/TEST-REPORT-V0.2.4.md`.
+
 ## Resolved in 0.2.3
 
 - Native Wayland file drops now work: winit 0.30 has no Wayland data-device
   implementation, so Pretty attaches a private Wayland DnD queue
   (`guth-wayland-dnd`) and funnels `Dropped` paths through the existing
   shell-quoted insertion path. X11/Windows/macOS keep winit's native events.
-- `.desktop` launch now applies the launcher activation token
-  (`XDG_ACTIVATION_TOKEN` / `DESKTOP_STARTUP_ID`), clears it before spawning
-  the shell, and requests `xdg_activation` attention when a launcher supplies
-  no token. This removes the startup-feedback delay/silence and the occasional
-  failed-launch exit code. See `docs/TEST-REPORT-V0.2.3.md`.
+- The activation-token half of `.desktop` launching was added
+  (`XDG_ACTIVATION_TOKEN` / `DESKTOP_STARTUP_ID`, cleared before spawning the
+  shell, `xdg_activation` fallback). This fixed focus/raise, but the separate
+  `Terminal=true` `-e` argv problem still needed 0.2.4. See
+  `docs/TEST-REPORT-V0.2.3.md` and `docs/TEST-REPORT-V0.2.4.md`.
 
 ## Windows GLES backend (disabled in 0.2.2)
 

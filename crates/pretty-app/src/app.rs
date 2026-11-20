@@ -3495,7 +3495,7 @@ fn is_safe_hyperlink(uri: &str) -> bool {
 /// Returns `None` on Windows when the path contains `%`: cmd.exe expands
 /// environment variables inside double quotes and offers no escape, so the
 /// only safe behaviour is to refuse the insertion instead of injecting it.
-fn shell_quote_path(path: &str) -> Option<String> {
+pub(crate) fn shell_quote_path(path: &str) -> Option<String> {
     #[cfg(windows)]
     {
         if path.contains('%') {

@@ -6,7 +6,7 @@
 
 Rust · `wgpu` · 全平台 Vulkan（macOS 用 Metal、Windows 用 Direct3D 12）· GPL-3.0
 
-[**下载 v0.2.3**](https://github.com/mappingAu/pretty/releases/tag/v0.2.3)
+[**下载 v0.2.4**](https://github.com/mappingAu/pretty/releases/tag/v0.2.4)
 · [安装](#安装)
 · [功能](#功能)
 · [English](README.md)
@@ -28,15 +28,15 @@ Rust · `wgpu` · 全平台 Vulkan（macOS 用 Metal、Windows 用 Direct3D 12�
 ## 安装
 
 所有平台的预编译包都在
-[**v0.2.3**](https://github.com/mappingAu/pretty/releases/tag/v0.2.3)：
+[**v0.2.4**](https://github.com/mappingAu/pretty/releases/tag/v0.2.4)：
 
 | 平台 | 文件 | 安装方式 |
 |---|---|---|
-| Fedora / RHEL / openSUSE（RPM） | `pretty-terminal-0.2.3-1.x86_64.rpm` | `sudo dnf install ./pretty-terminal-0.2.3-1.x86_64.rpm`（或 `zypper install`） |
-| Debian / Ubuntu | `pretty-terminal_0.2.3_amd64.deb` | `sudo apt install ./pretty-terminal_0.2.3_amd64.deb` |
-| 任意 Linux | `pretty-0.2.3-linux-x86_64.tar.gz` | 解压后执行 `./install.sh`，或直接运行 `./bin/pretty` |
-| Windows 10/11 | `pretty-0.2.3-windows-x86_64.zip` | 解压后运行 `pretty.exe`（Direct3D 12 或 Vulkan） |
-| macOS 11+（arm64） | `pretty-0.2.3-macos-arm64.app.tar.gz` | 解压后把 `Pretty.app` 拖入「应用程序」 |
+| Fedora / RHEL / openSUSE（RPM） | `pretty-terminal-0.2.4-1.x86_64.rpm` | `sudo dnf install ./pretty-terminal-0.2.4-1.x86_64.rpm`（或 `zypper install`） |
+| Debian / Ubuntu | `pretty-terminal_0.2.4_amd64.deb` | `sudo apt install ./pretty-terminal_0.2.4_amd64.deb` |
+| 任意 Linux | `pretty-0.2.4-linux-x86_64.tar.gz` | 解压后执行 `./install.sh`，或直接运行 `./bin/pretty` |
+| Windows 10/11 | `pretty-0.2.4-windows-x86_64.zip` | 解压后运行 `pretty.exe`（Direct3D 12 或 Vulkan） |
+| macOS 11+（arm64） | `pretty-0.2.4-macos-arm64.app.tar.gz` | 解压后把 `Pretty.app` 拖入「应用程序」 |
 
 需要支持 Vulkan 的显卡；Pretty 不会回退到 CPU 渲染。从源码构建：
 
