@@ -515,7 +515,7 @@ run (not to a GitHub release).
 - [Cross-platform status and prerequisites](docs/CROSS-PLATFORM.md)
 - [Cross-compile report](docs/CROSS-COMPILE.md)
 - [v0.2.4 terminal-launcher report](docs/TEST-REPORT-V0.2.4.md)
-- [v0.2.3 file-drop and launch report](docs/TEST-REPORT-V0.2.3.md)
+- [v0.2.3 file-drop report](docs/TEST-REPORT-V0.2.3.md)
 - [v0.2.1 fix and verification report](docs/TEST-REPORT-V0.2.1.md)
 - [v0.2.0 QA and test report](docs/TEST-REPORT-V0.2.0.md)
 - [0.2.0 core/UX audit](docs/AUDIT-020.md)

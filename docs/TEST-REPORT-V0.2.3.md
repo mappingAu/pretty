@@ -1,4 +1,4 @@
-# Pretty v0.2.3 — file drops and desktop launch
+# Pretty v0.2.3 — native Wayland file drops
 
 **Run:** 0.2.3 patch release
 **Date:** 2026-11-20 (Asia/Shanghai)
@@ -6,8 +6,8 @@
 proprietary 580.196.07; Rust stable 1.100
 **Starting point:** `v0.2.2` (`fa91e30`)
 
-This release fixes the two reported issues. It does not change the renderer or
-the 0.2.1/0.2.2 fixes.
+This release fixes the reported file-drop issue. It does not change the renderer
+or the 0.2.1/0.2.2 fixes.
 
 ## 1. File drag-and-drop on native Wayland
 
@@ -50,44 +50,6 @@ goes through the clipboard (`text/uri-list`), not the data-device drag path.
   the physical drag itself was left for the reporter to confirm with the same
   Dolphin setup.
 
-## 2. `.desktop` launch delay / silence / exit 1
-
-### Root cause
-
-Desktop launchers (KDE, GNOME, etc.) pass `XDG_ACTIVATION_TOKEN` (Wayland) or
-`DESKTOP_STARTUP_ID` (X11) so the compositor can focus and raise the new
-window. Winit only applies such a token when it is explicitly passed to
-`WindowAttributes::with_activation_token`; Pretty never read the environment,
-so the launcher's startup feedback waited for a window that was not activated
-(and could report a failed launch). KDE's systemd application launcher also
-sometimes starts the app without a token; in that case the window can open
-without focus.
-
-### Fix
-
-- Read the launcher token with
-  `EventLoopExtStartupNotify::read_token_from_env` and apply it with
-  `with_activation_token` on Linux.
-- Remove the token from the environment with `reset_activation_token_env` before
-  spawning the shell, so the shell and its children do not inherit a stale
-  activation token.
-- If no token is present (observed with KDE's systemd application launcher),
-  call `Window::request_user_attention(Informational)` after mapping. On
-  Wayland this uses `xdg_activation` to request activation instead of silently
-  opening behind the current window.
-
-### Verification
-
-- `gtk-launch` (token present): log
-  `startup activation token: present`; window opens and is active.
-- KDE `kstart --application` / systemd app service (token absent): log
-  `startup activation token: absent` and
-  `no launcher activation token; requested xdg_activation attention`; the
-  window opens and becomes active.
-- Five launcher runs (gtk-launch and kstart, token present/absent) completed
-  without exit code 1 or a visible startup stall. The app continues to run
-  normally from a terminal, where no activation token exists.
-
 ## Tests
 
 ```
@@ -105,7 +67,7 @@ New/changed tests:
 
 **Issue #1 (Windows GLES crash) is not fixed in 0.2.3.** GLES remains disabled
 on Windows; the investigation and fix are deferred to the next **minor**
-release (0.3.0), as stated on the v0.2.3 release page.
+release, as stated on the v0.2.3 release page.
 
 ## Limitations
 

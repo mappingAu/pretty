@@ -5,9 +5,8 @@
 **Host:** Fedora 45, KDE Plasma 6.8.2 (Wayland); Rust stable 1.100
 **Starting point:** `v0.2.3` (`644d05d`)
 
-This release fixes the remaining `.desktop` launch case from the report. The
-0.2.3 activation-token fix is still present, but it did not address a desktop
-entry with `Terminal=true`.
+This release fixes the `.desktop` launch problem from the report: an entry
+with `Terminal=true`.
 
 ## Root cause
 
@@ -28,10 +27,9 @@ runs:
 /usr/bin/pretty -e <Exec...>
 ```
 
-winit 0.30's activation token was not the failing path here. Pretty's CLI had
-a terminal-emulator-shaped `-e` option, but it consumed **one** argument and
-then continued parsing the command's own arguments as Pretty options. For
-example:
+Pretty's CLI had a terminal-emulator-shaped `-e` option, but it consumed
+**one** argument and then continued parsing the command's own arguments as
+Pretty options. For example:
 
 ```text
 pretty -e sh -c 'sleep 1'
@@ -86,14 +84,13 @@ cargo test --workspace --locked
 # = 142 passed, 1 ignored, 0 failed
 ```
 
-The 0.2.3 native-Wayland drag-and-drop bridge and activation-token handling
-are unchanged.
+The native-Wayland drag-and-drop bridge is unchanged.
 
 ## Release note
 
 **Issue #1 (Windows GLES) is not fixed in 0.2.4.** GLES remains disabled on
 Windows and the wgpu/ANGLE investigation is deferred to the next **minor**
-release (0.3.0), as on the v0.2.4 release page.
+release, as stated on the v0.2.4 release page.
 
 ## Limitations
 

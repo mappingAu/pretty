@@ -71,7 +71,7 @@ tar -xzf %{SOURCE0} -C %{buildroot} --strip-components=1
 * Fri Nov 20 2026 Pretty Authors <dev@pretty.local> - 0.2.4-1
 - 0.2.4: handle Terminal=true terminal-launcher -e command lines
 * Fri Nov 20 2026 Pretty Authors <dev@pretty.local> - 0.2.3-1
-- 0.2.3: native Wayland file drops and desktop-launch activation
+- 0.2.3: native Wayland file drops
 * Sat Nov 14 2026 Pretty Authors <dev@pretty.local> - 0.2.2-1
 - 0.2.2: disable GLES on Windows, compile Vulkan on every platform
 * Sat Nov 14 2026 Pretty Authors <dev@pretty.local> - 0.2.1-1

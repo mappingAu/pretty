@@ -33,11 +33,7 @@ renderer or represent a compile-only stub as a supported platform.
   implementation, so Pretty attaches a private Wayland DnD queue
   (`guth-wayland-dnd`) and funnels `Dropped` paths through the existing
   shell-quoted insertion path. X11/Windows/macOS keep winit's native events.
-- The activation-token half of `.desktop` launching was added
-  (`XDG_ACTIVATION_TOKEN` / `DESKTOP_STARTUP_ID`, cleared before spawning the
-  shell, `xdg_activation` fallback). This fixed focus/raise, but the separate
-  `Terminal=true` `-e` argv problem still needed 0.2.4. See
-  `docs/TEST-REPORT-V0.2.3.md` and `docs/TEST-REPORT-V0.2.4.md`.
+  See `docs/TEST-REPORT-V0.2.3.md`.
 
 ## Windows GLES backend (disabled in 0.2.2)
 
