@@ -25,6 +25,10 @@ renderer or represent a compile-only stub as a supported platform.
   the whole remaining command line (instead of one argument and then treating
   the command's `-c`/flags as Pretty options, which exited 1), and a
   self-exec (`Exec=pretty`) no longer opens a nested second Pretty window.
+- New tabs and splits from a `-e`/`-x` launch no longer repeat that command;
+  they open the configured login shell, like Konsole. The window/tab title now
+  follows the PTY foreground process on Linux (`tcgetpgrp`,
+  `/proc/<pgid>/comm`) instead of staying at the shell name.
   See `docs/TEST-REPORT-V0.2.4.md`.
 
 ## Resolved in 0.2.3

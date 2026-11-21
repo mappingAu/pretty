@@ -55,6 +55,26 @@ the first (nested window).
 - The same handling applies to `--command`; `--command` remains available for
   explicit shell strings.
 
+## New tabs: no inherited `-e` command
+
+`-e`/`-x` argv belongs to the window that the desktop launched. `new_tab` and
+`split_pane` ask `PaneCommand::for_new_pane()`: `Argv` becomes `LoginShell`, so
+a shortcut that starts `htop` still opens a normal shell in a new tab. A
+`--command` shell string keeps its existing behavior. The initial pane uses the
+full `-e` argv directly (through `pane.pty`), not a shell wrapper, so arguments
+such as `-c` reach the program exactly once.
+
+## Window title follows the running program
+
+The title was only updated by OSC 0/2 or the spawn-time shell name, so a shell
+that never emits a title stayed "bash" even while htop/vim was running. Pane
+titles now sample the PTY foreground process group with `tcgetpgrp()` and read
+`/proc/<pgid>/comm` on Linux (other Unix targets keep the fallback). Sampling
+runs on the existing 16 ms blink tick at most every 500 ms; it does not add a
+new timer or repaint an idle window. An explicit OSC title, and `--title`, win
+over the sampled name; clearing the OSC title returns to it. New tabs start
+from the login shell name, and `-e htop` starts from `htop`, not `bash`.
+
 ## Verification
 
 Direct terminal-launcher form (the exact shape KDE used for `Terminal=true`):
@@ -72,16 +92,17 @@ Direct terminal-launcher form (the exact shape KDE used for `Terminal=true`):
 
 New CLI tests (`crates/pretty-app/src/main.rs`):
 
-- `terminal_e_consumes_the_whole_command_line`
+- `terminal_e_consumes_the_whole_argv_verbatim`
 - `terminal_x_is_an_alias_for_e`
 - `one_command_argument_is_kept_as_a_shell_string`
 - `terminal_e_requires_a_command`
 - `self_launch_is_detected_and_skipped`
+- `new_tabs_do_not_repeat_the_launcher_command` (app)
 
 ```
 cargo test --workspace --locked
-# 51 app + 61 core + 9 audit + 2 PTY (+1 ignored) + 4 QA + 15 renderer
-# = 142 passed, 1 ignored, 0 failed
+# 52 app + 61 core + 9 audit + 2 PTY (+1 ignored) + 4 QA + 15 renderer
+# = 143 passed, 1 ignored, 0 failed
 ```
 
 The native-Wayland drag-and-drop bridge is unchanged.

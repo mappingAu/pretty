@@ -35,6 +35,8 @@ struct Cli {
     config: Option<PathBuf>,
     renderer: Option<String>,
     command: Option<String>,
+    /// Arguments after `-e`/`-x`; executed directly as the pane command.
+    argv: Option<Vec<String>>,
     print_info: bool,
     font_size: Option<f32>,
     opacity: Option<f32>,
@@ -70,7 +72,22 @@ where
         // Pretty's own options: KDE's Terminal=true launcher runs
         // `/usr/bin/pretty -e <Exec...>`, and a single-argument -e used to
         // leave the command's own flags for Pretty to reject with exit 1.
-        if matches!(key.as_str(), "--command" | "-e" | "-x") {
+        if key == "--command" {
+            let command = if let Some(value) = inline {
+                value
+            } else {
+                args.next().ok_or_else(|| "--command requires a value".to_owned())?
+            };
+            if is_self_command(&command) {
+                log::info!("terminal launcher asked Pretty to run itself; ignoring nested launch");
+                continue;
+            }
+            // --command keeps its original contract: one shell command string,
+            // not a terminal-launcher argv.
+            cli.command = Some(command);
+            continue;
+        }
+        if matches!(key.as_str(), "-e" | "-x") {
             let first = if let Some(value) = inline {
                 value
             } else {
@@ -87,7 +104,10 @@ where
             }
             let mut rest = vec![first];
             rest.extend(args.by_ref());
-            cli.command = Some(join_command_args(&rest)?);
+            if rest.iter().any(|arg| arg.contains('%')) && cfg!(windows) {
+                return Err("command argument contains '%' (cmd.exe expansion)".to_owned());
+            }
+            cli.argv = Some(rest);
             break;
         }
         let mut next = |name: &str| -> Result<String, String> {
@@ -143,21 +163,6 @@ fn is_self_command(arg: &str) -> bool {
         (Ok(given), Ok(exe)) => given == exe,
         _ => false,
     }
-}
-
-#[cfg(not(target_os = "android"))]
-fn join_command_args(args: &[String]) -> Result<String, String> {
-    if args.len() == 1 {
-        return Ok(args[0].clone());
-    }
-    let mut quoted = Vec::with_capacity(args.len());
-    for arg in args {
-        let Some(arg) = crate::app::shell_quote_path(arg) else {
-            return Err("command argument contains '%' (cmd.exe expansion)".to_owned());
-        };
-        quoted.push(arg);
-    }
-    Ok(quoted.join(" "))
 }
 
 #[cfg(not(target_os = "android"))]
@@ -343,6 +348,7 @@ mod android_entry {
         let options = AppOptions {
             renderer,
             command: None,
+            argv: Vec::new(),
             fullscreen: false,
             title: None,
             config_path: path,
@@ -513,6 +519,7 @@ fn main() -> ExitCode {
     let options = AppOptions {
         renderer,
         command: cli.command,
+        argv: cli.argv.unwrap_or_default(),
         fullscreen: cli.fullscreen,
         title: cli.title,
         config_path: path,
@@ -539,18 +546,21 @@ mod cli_tests {
     }
 
     #[test]
-    fn terminal_e_consumes_the_whole_command_line() {
+    fn terminal_e_consumes_the_whole_argv_verbatim() {
         let cli = parse(&["-e", "sh", "-c", "echo hi"]).unwrap();
-        assert_eq!(cli.command.as_deref(), Some("'sh' '-c' 'echo hi'"));
+        assert_eq!(
+            cli.argv.as_deref(),
+            Some(&["sh".to_owned(), "-c".to_owned(), "echo hi".to_owned()][..])
+        );
         // -e must not let the command's flags be parsed as Pretty options.
         let cli = parse(&["-e", "foo", "--bar"]).unwrap();
-        assert_eq!(cli.command.as_deref(), Some("'foo' '--bar'"));
+        assert_eq!(cli.argv.as_deref(), Some(&["foo".to_owned(), "--bar".to_owned()][..]));
     }
 
     #[test]
     fn terminal_x_is_an_alias_for_e() {
         let cli = parse(&["-x", "htop"]).unwrap();
-        assert_eq!(cli.command.as_deref(), Some("htop"));
+        assert_eq!(cli.argv.as_deref(), Some(&["htop".to_owned()][..]));
     }
 
     #[test]
@@ -570,6 +580,7 @@ mod cli_tests {
         let exe = exe.to_string_lossy().into_owned();
         let cli = parse(&["--title", "SelfTest", "-e", &exe, "--title", "Ignored"]).unwrap();
         assert_eq!(cli.command, None);
+        assert!(cli.argv.is_none());
         assert_eq!(cli.title.as_deref(), Some("Ignored"));
         assert!(is_self_command(&exe));
         assert!(!is_self_command("/bin/sh"));

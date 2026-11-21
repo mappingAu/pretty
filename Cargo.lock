@@ -2640,6 +2640,7 @@ dependencies = [
  "base64",
  "crossbeam-channel",
  "image",
+ "libc",
  "log",
  "notify-rust",
  "portable-pty",

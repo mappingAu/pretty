@@ -57,12 +57,28 @@ fn program_title(shell: &str) -> String {
     } else {
         shell.to_owned()
     };
-    std::path::Path::new(&shell)
+    // `--command` may be a whole command line ("bash -lc ..."): only the
+    // program name is shown.
+    let program = shell.split_whitespace().next().unwrap_or(&shell);
+    std::path::Path::new(program)
         .file_stem()
         .and_then(|name| name.to_str())
         .filter(|name| !name.is_empty())
         .unwrap_or("Terminal")
         .to_owned()
+}
+
+/// Title for a pane started by `command`: the first program of a `-e`/`-x`
+/// argv or of a `--command` line, and the shell otherwise.
+fn program_title_of_command(command: &PaneCommand, shell: &str) -> String {
+    match command {
+        PaneCommand::LoginShell => program_title(shell),
+        PaneCommand::Shell(line) => program_title(line),
+        PaneCommand::Argv(argv) => argv
+            .first()
+            .map(|program| program_title(program))
+            .unwrap_or_else(|| program_title(shell)),
+    }
 }
 
 /// Give the Wayland surface a real `app_id` so KWin can match it to
@@ -154,11 +170,38 @@ impl BlinkPhase {
 pub struct AppOptions {
     pub renderer: RendererKind,
     pub command: Option<String>,
+    /// Arguments after `-e`/`-x`, executed directly. Takes precedence over
+    /// `command`; unlike `--command` it is not re-parsed by a shell.
+    pub argv: Vec<String>,
     pub fullscreen: bool,
     pub title: Option<String>,
     pub config_path: PathBuf,
     pub benchmark_frames: Option<u32>,
     pub allow_software: bool,
+}
+
+/// How a pane's program is started.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PaneCommand {
+    /// Run the configured login shell (the normal terminal).
+    LoginShell,
+    /// Run `--command`/`-e` as one shell command line.
+    Shell(String),
+    /// Run the trailing argument vector of `-e`/`-x` directly.
+    Argv(Vec<String>),
+}
+
+impl PaneCommand {
+    /// New tabs and splits cancel `-e`/`-x` the way Konsole does: the
+    /// overridden command belongs to the window that started it, not to every
+    /// terminal opened afterwards. Only the configured login shell and a
+    /// `--command` shell line carry over.
+    fn for_new_pane(&self) -> Self {
+        match self {
+            Self::Argv(_) => Self::LoginShell,
+            other => other.clone(),
+        }
+    }
 }
 
 struct Pane {
@@ -167,6 +210,14 @@ struct Pane {
     pty_rx: Receiver<Vec<u8>>,
     term_events: Receiver<TerminalEvent>,
     title: String,
+    /// Title used when the program clears its window title (OSC 0/2 empty).
+    fallback_title: String,
+    /// Non-empty when the running program set an explicit OSC title. Such a
+    /// title wins over the foreground-process name.
+    title_override: Option<String>,
+    /// Last foreground program name observed for this PTY, to avoid touching
+    /// the window title every poll.
+    foreground_name: Option<String>,
     rect: Rect,
     cols: usize,
     rows: usize,
@@ -364,6 +415,8 @@ pub struct PrettyApp {
     scale_factor: f64,
     blink: BlinkPhase,
     blink_thread_stop: Arc<AtomicBool>,
+    /// Last time the foreground program name was sampled for titles.
+    last_title_poll: Instant,
     frame_times: Vec<f32>,
     last_frame: Instant,
     pub failed: bool,
@@ -479,6 +532,7 @@ impl PrettyApp {
             scale_factor: 1.0,
             blink: BlinkPhase::started(initial_blink_interval),
             blink_thread_stop,
+            last_title_poll: Instant::now(),
             frame_times: Vec::new(),
             last_frame: Instant::now(),
             failed: false,
@@ -667,7 +721,9 @@ impl PrettyApp {
                 self.options
                     .title
                     .clone()
-                    .unwrap_or_else(|| program_title(&self.config.shell)),
+                    .unwrap_or_else(|| {
+                        program_title_of_command(&self.initial_command(), &self.login_shell())
+                    }),
             )
             .with_inner_size(LogicalSize::new(
                 self.config.window_width as f64,
@@ -885,18 +941,44 @@ impl PrettyApp {
     }
 
     fn spawn_pane(&mut self, id: PaneId, rect: Rect) -> Result<Pane, String> {
+        self.spawn_pane_with(id, rect, &self.initial_command())
+    }
+
+    /// The program for the first pane: `-e`/`-x` argv when given, otherwise
+    /// `--command`, otherwise the configured login shell.
+    fn initial_command(&self) -> PaneCommand {
+        if !self.options.argv.is_empty() {
+            return PaneCommand::Argv(self.options.argv.clone());
+        }
+        match &self.options.command {
+            Some(command) => PaneCommand::Shell(command.clone()),
+            None => PaneCommand::LoginShell,
+        }
+    }
+
+    fn login_shell(&self) -> String {
+        if self.config.shell.trim().is_empty() {
+            crate::config::default_shell()
+        } else {
+            self.config.shell.clone()
+        }
+    }
+
+    fn spawn_pane_with(
+        &mut self,
+        id: PaneId,
+        rect: Rect,
+        command: &PaneCommand,
+    ) -> Result<Pane, String> {
         let (cols, rows) = self.pane_grid_size(rect);
         let metrics = self.renderer.as_ref().map(|r| r.cell_metrics()).unwrap_or_default();
         let cell_w = metrics.cell_w.round().max(1.0) as u16;
         let cell_h = metrics.cell_h.round().max(1.0) as u16;
-        let shell = if self.config.shell.trim().is_empty() {
-            crate::config::default_shell()
-        } else {
-            self.config.shell.clone()
-        };
-        let argv = match &self.options.command {
-            Some(command) => shell_command(&shell, command),
-            None => vec![shell],
+        let shell = self.login_shell();
+        let argv = match command {
+            PaneCommand::LoginShell => vec![shell.clone()],
+            PaneCommand::Shell(line) => shell_command(&shell, line),
+            PaneCommand::Argv(argv) => argv.clone(),
         };
         let (backend, gpu_name) = self
             .renderer
@@ -953,12 +1035,18 @@ impl PrettyApp {
             rect.x,
             rect.y
         );
+        let program_title = program_title_of_command(command, &shell);
         Ok(Pane {
             term,
             pty,
             pty_rx,
             term_events,
-            title: self.default_pane_title(),
+            // --title is an explicit window title and must survive the first
+            // update_title() call and the foreground-process poll.
+            title: self.options.title.clone().unwrap_or_else(|| program_title.clone()),
+            fallback_title: program_title,
+            title_override: self.options.title.clone(),
+            foreground_name: None,
             rect,
             cols,
             rows,
@@ -968,13 +1056,6 @@ impl PrettyApp {
     /// Initial/replacement title for a pane that has not reported one yet.
     /// `--title` still wins; otherwise the configured shell's program name is
     /// used ("bash", "zsh", ...), never the terminal's own name.
-    fn default_pane_title(&self) -> String {
-        self.options
-            .title
-            .clone()
-            .unwrap_or_else(|| program_title(&self.config.shell))
-    }
-
     fn resize_all(&mut self) {
         if self.renderer.is_none() {
             return;
@@ -997,6 +1078,41 @@ impl PrettyApp {
                 }
                 log::debug!("pane {} resized to {}x{}", id.0, cols, rows);
             }
+        }
+    }
+
+    /// Follow the PTY's foreground process for the window/tab title.
+    ///
+    /// Shells do not emit an event when a child starts or exits, so sampling
+    /// `tcgetpgrp` is the only way to show the program that is actually
+    /// running (htop/vim/…) instead of the shell name forever. An explicit
+    /// OSC 0/2 title wins; clearing it (OSC 0/2 empty) returns to this
+    /// automatic title.
+    fn refresh_program_titles(&mut self) -> bool {
+        #[cfg(unix)]
+        {
+            let mut changed = false;
+            for pane in self.panes.values_mut() {
+                let Some(name) = pane.pty.foreground_process_name() else {
+                    continue;
+                };
+                if pane.foreground_name.as_deref() == Some(name.as_str()) {
+                    continue;
+                }
+                pane.foreground_name = Some(name.clone());
+                if pane.title_override.is_none() && pane.title != name {
+                    pane.title = name;
+                    changed = true;
+                }
+            }
+            if changed {
+                self.update_title();
+            }
+            return changed;
+        }
+        #[cfg(not(unix))]
+        {
+            false
         }
     }
 
@@ -1421,7 +1537,8 @@ impl PrettyApp {
         let area = self.layout_area();
         let id = PaneId(self.next_pane);
         let rect = area;
-        match self.spawn_pane(id, rect) {
+        let command = self.initial_command().for_new_pane();
+        match self.spawn_pane_with(id, rect, &command) {
             Ok(pane) => {
                 self.panes.insert(id, pane);
                 self.next_pane += 1;
@@ -1509,7 +1626,8 @@ impl PrettyApp {
             pretty_core::Axis::Horizontal => Rect::new(base_rect.x, base_rect.y, base_rect.w / 2.0, base_rect.h),
             pretty_core::Axis::Vertical => Rect::new(base_rect.x, base_rect.y, base_rect.w, base_rect.h / 2.0),
         };
-        match self.spawn_pane(id, approx) {
+        let command = self.initial_command().for_new_pane();
+        match self.spawn_pane_with(id, approx, &command) {
             Ok(pane) => {
                 self.panes.insert(id, pane);
                 if !self.layout.split(target, id, axis) {
@@ -1696,6 +1814,7 @@ impl PrettyApp {
             match event {
                 TerminalEvent::Title(title) => {
                     if let Some(pane) = self.panes.get_mut(&id) {
+                        pane.title_override = Some(title.clone());
                         pane.title = title;
                     }
                     if self.focused == id {
@@ -1703,9 +1822,12 @@ impl PrettyApp {
                     }
                 }
                 TerminalEvent::ResetTitle => {
-                    let fallback = self.default_pane_title();
                     if let Some(pane) = self.panes.get_mut(&id) {
-                        pane.title = fallback;
+                        // Clearing the title must not change *which* program
+                        // the pane shows: keep this pane's own fallback so a
+                        // `-e htop` pane does not become "bash".
+                        pane.title_override = None;
+                        pane.title = pane.fallback_title.clone();
                     }
                     if self.focused == id {
                         self.update_title();
@@ -3039,6 +3161,17 @@ impl ApplicationHandler<UserEvent> for PrettyApp {
                         w.request_redraw();
                     }
                 }
+                // The blink thread already ticks every 16 ms; reuse it for a
+                // cheap 500 ms foreground-program title sample instead of
+                // adding another timer/thread.
+                if self.last_title_poll.elapsed() >= Duration::from_millis(500) {
+                    self.last_title_poll = Instant::now();
+                    if self.refresh_program_titles() {
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                    }
+                }
                 self.update_pointer_visibility();
             }
             #[cfg(target_os = "linux")]
@@ -3937,7 +4070,10 @@ fn install_ui_font(ctx: &egui::Context) {
 
 #[cfg(test)]
 mod tests {
-    use super::{chrome_layout, program_title, shell_quote_path, Shortcut};
+    use super::{
+        chrome_layout, program_title, program_title_of_command, shell_quote_path, PaneCommand,
+        Shortcut,
+    };
 
     // POSIX single-quote quoting; Windows has its own CommandLineToArgvW
     // test below and uses double quotes.
@@ -3979,6 +4115,26 @@ mod tests {
             super::file_drop_text(std::path::Path::new("/tmp/plain")).as_deref(),
             Some("'/tmp/plain' ")
         );
+    }
+
+    #[test]
+    fn new_tabs_do_not_repeat_the_launcher_command() {
+        // KDE's Terminal=true launcher starts `pretty -e <Exec...>`. Konsole
+        // does not repeat that command for a second tab, so a `-e` argv only
+        // belongs to the window that started it.
+        let argv = PaneCommand::Argv(vec!["htop".into()]);
+        assert_eq!(argv.for_new_pane(), PaneCommand::LoginShell);
+        let line = PaneCommand::Shell("bash -lc 'echo hi'".into());
+        assert_eq!(line.for_new_pane(), line);
+        assert_eq!(PaneCommand::LoginShell.for_new_pane(), PaneCommand::LoginShell);
+        // Overridden command names are what the pane shows, not the shell.
+        assert_eq!(program_title_of_command(&argv, "/bin/bash"), "htop");
+        assert_eq!(program_title_of_command(&line, "/bin/bash"), "bash");
+        assert_eq!(
+            program_title_of_command(&PaneCommand::Argv(vec!["/usr/bin/vim".into(), "x".into()]), "/bin/bash"),
+            "vim"
+        );
+        assert_eq!(program_title_of_command(&PaneCommand::LoginShell, "/usr/bin/zsh"), "zsh");
     }
 
     #[test]

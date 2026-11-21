@@ -184,6 +184,40 @@ impl PtySession {
         self.child.process_id()
     }
 
+    /// Name of the program currently in the PTY's foreground process group.
+    ///
+    /// A shell does not tell the terminal when it starts or stops a child, so
+    /// the window/tab title has to follow the kernel's foreground process
+    /// group instead of the shell's name. Linux exposes the name in
+    /// `/proc/<pgid>/comm`; other Unix targets return `None` and keep using
+    /// the shell/OSC title.
+    #[cfg(unix)]
+    pub fn foreground_process_name(&self) -> Option<String> {
+        let master = self.master.as_ref()?;
+        let fd = master.as_raw_fd()?;
+        // tcgetpgrp is the portable (POSIX) way to ask which process group
+        // currently owns the terminal.
+        let pgid = unsafe { libc::tcgetpgrp(fd) };
+        if pgid <= 0 {
+            return None;
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let comm = std::fs::read_to_string(format!("/proc/{pgid}/comm")).ok()?;
+            let name = comm.trim();
+            if name.is_empty() {
+                None
+            } else {
+                Some(name.to_owned())
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = pgid;
+            None
+        }
+    }
+
     /// Check whether the child process has exited, without blocking.
     ///
     /// `pretty-app` owns the pane/tab lifecycle, so it has to poll this (for

@@ -20,5 +20,8 @@ thiserror.workspace = true
 [target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
 notify-rust.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(windows)'.dependencies]
 winapi-util = "0.1"
