@@ -4250,6 +4250,12 @@ mod tests {
         let mut config = crate::config::Config::default();
         config.renderer = "gles".into();
         config.validate();
+        // Only Linux builds advertise GLES; on macOS/Windows validate() has
+        // already rewritten the request to `auto` and the notice is a
+        // different one (covered by unavailable_backend_reports_the_requested_name).
+        if (cfg!(target_os = "windows") || cfg!(target_os = "macos")) || !cfg!(feature = "gles") {
+            return;
+        }
         // GLES on a Wayland session that had to use X11/XWayland.
         let notice = crate::renderer_notice_for(&config, true, DisplayKind::X11, true);
         assert!(matches!(
