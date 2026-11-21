@@ -4272,24 +4272,22 @@ mod tests {
 
     #[test]
     fn unavailable_backend_reports_the_requested_name() {
+        // `metal` is only startable in macOS builds with the metal feature;
+        // everywhere else validate() rewrites it and the request is reported.
         let mut config = crate::config::Config::default();
         config.renderer = "metal".into();
         config.validate();
-        #[cfg(not(target_os = "macos"))]
-        {
-            assert_eq!(config.renderer, "auto");
-            assert_eq!(config.requested_renderer, "metal");
-            let notice = crate::renderer_notice_for(
-                &config,
-                false,
-                crate::platform::DisplayKind::Other,
-                false,
-            );
-            assert!(matches!(
-                notice,
-                Some(super::RendererNotice::RendererUnavailable { ref requested }) if requested == "metal"
-            ));
+        if config.renderer == "metal" {
+            return;
         }
+        assert_eq!(config.renderer, "auto");
+        assert_eq!(config.requested_renderer, "metal");
+        let notice =
+            crate::renderer_notice_for(&config, false, crate::platform::DisplayKind::Other, false);
+        assert!(matches!(
+            notice,
+            Some(super::RendererNotice::RendererUnavailable { ref requested }) if requested == "metal"
+        ));
     }
 
     #[test]

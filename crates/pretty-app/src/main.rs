@@ -29,34 +29,6 @@ use crate::app::{AppOptions, PrettyApp, RendererNotice, UserEvent};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Why GLES cannot present on native Wayland on this host, or `None` when the
-/// GLES backend keeps the native Wayland surface.
-///
-/// GLES is compiled for desktop Linux/Mac/BSD only; the affected combination
-/// is Linux on a Wayland session with the current NVIDIA driver, whose Wayland
-/// EGL path exposes no usable window presentation config.
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
-fn gles_wayland_limitation() -> Option<&'static str> {
-    #[cfg(target_os = "linux")]
-    {
-        // The bundled BSD builds keep a native Wayland surface; only Linux
-        // has the EGL driver limitation.
-        Some(
-            "On Wayland this driver cannot present OpenGL ES natively, so \
-             Pretty uses an X11/XWayland window instead of a native Wayland one.",
-        )
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        None
-    }
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-fn gles_wayland_limitation() -> Option<&'static str> {
-    None
-}
-
 /// Startup notice for a rendering backend that cannot run as configured.
 ///
 /// Returns `None` when nothing was substituted. A requested backend that was
@@ -90,17 +62,6 @@ fn renderer_notice_for(
         });
     }
     None
-}
-
-/// Whether selecting GLES on this Linux host loses native Wayland.
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
-fn gles_forces_x11() -> bool {
-    gles_wayland_limitation().is_some()
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-fn gles_forces_x11() -> bool {
-    false
 }
 
 #[cfg(not(target_os = "android"))]

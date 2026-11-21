@@ -37,8 +37,9 @@ pub struct SettingsState {
     /// within a few seconds applies the defaults.
     reset_armed: Option<Instant>,
     /// A backend choice that loses native Wayland (GLES) and awaits
-    /// confirmation. The draft already holds the new value.
-    pub pending_renderer: Option<String>,
+    /// confirmation. The value the draft held before the click is kept so
+    /// "Cancel" restores it instead of jumping to `auto`.
+    pub pending_renderer: Option<PendingBackend>,
 }
 
 impl SettingsState {
@@ -60,6 +61,15 @@ impl SettingsState {
             self.draft = config.clone();
         }
     }
+}
+
+/// A backend selection that is waiting for the user's confirmation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingBackend {
+    /// Backend chosen in the combo box (already in the draft).
+    pub target: String,
+    /// Backend in effect before the click; restored on cancel.
+    pub previous: String,
 }
 
 pub struct RuntimeInfo<'a> {
@@ -282,9 +292,14 @@ pub fn show(
         state.pending_renderer = None;
         outcome.confirm_renderer = Some(target);
     } else if cancel_backend {
-        state.pending_renderer = None;
-        draft.renderer = "auto".to_owned();
+        let previous = state
+            .pending_renderer
+            .take()
+            .map(|pending| pending.previous)
+            .unwrap_or_else(|| draft.renderer.clone());
+        draft.renderer = previous;
         outcome.cancel_renderer = true;
+        // The draft is restored, so nothing changed this frame.
         changed = false;
     }
     // The import button records a request the application fulfils after this
@@ -1159,10 +1174,12 @@ fn rendering(
     lang: Lang,
     changed: &mut bool,
     // A backend selected here but not yet confirmed (its warning is open).
-    pending: &mut Option<String>,
+    pending: &mut Option<PendingBackend>,
 ) {
     ui.horizontal(|ui| {
         ui.label(tr(lang, "Backend"));
+        // The value in effect before this frame's selection (used by the
+        // confirmation dialog to roll back on cancel).
         let before = cfg.renderer.clone();
         egui::ComboBox::from_id_salt("renderer-choice")
             .selected_text(cfg.renderer.clone())
@@ -1197,7 +1214,10 @@ fn rendering(
                 // draft keeps the new value while the warning is open.
                 if cfg.renderer != before {
                     if gles_needs_wayland_notice(&before, &cfg.renderer) {
-                        *pending = Some(cfg.renderer.clone());
+                        *pending = Some(PendingBackend {
+                            target: cfg.renderer.clone(),
+                            previous: before.clone(),
+                        });
                     } else {
                         *pending = None;
                     }
@@ -1263,14 +1283,15 @@ fn gles_needs_wayland_notice(from: &str, to: &str) -> bool {
 /// Warning shown while a backend choice awaits confirmation.
 fn renderer_notice_modal(
     ctx: &egui::Context,
-    pending: &Option<String>,
+    pending: &Option<PendingBackend>,
     cfg: &mut Config,
     lang: Lang,
     confirm: &mut Option<String>,
     cancel: &mut bool,
 ) {
-    let Some(target) = pending.as_deref() else { return };
-    if !gles_needs_wayland_notice("auto", target) {
+    let Some(pending) = pending.as_ref() else { return };
+    let target = pending.target.as_str();
+    if !gles_needs_wayland_notice(&pending.previous, target) {
         return;
     }
     let actual = crate::platform::current_display_kind().label();

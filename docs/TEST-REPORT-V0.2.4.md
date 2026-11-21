@@ -97,6 +97,13 @@ the window through X11/XWayland. That fallback is no longer silent:
 - The winit dependency now declares its features explicitly and
   `wayland-client`/`wayland-protocols` are Linux-only, so other targets still
   build.
+- Cancelling the settings dialog restores the backend that was in effect
+  before the click (not `auto`).
+- Everything else is written to be inert off Linux: `gles_needs_wayland_notice`
+  returns false unless `target_os = "linux"` and the session is Wayland, the
+  startup notice only appears for GLES on a Wayland session or for a backend
+  that `validate()` rewrote, and the tests pass in the Linux and Windows-like
+  (`vulkan,dx`) and macOS-like (`vulkan,metal`) feature sets.
 
 ## Verification
 

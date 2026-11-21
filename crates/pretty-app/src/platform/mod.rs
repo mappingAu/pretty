@@ -56,59 +56,6 @@ pub fn is_wayland_session() -> bool {
 /// Used before falling back to X11 for GLES: if `wl_compositor` is advertised
 /// and Pretty still cannot use native Wayland, that is a driver limitation the
 /// user has to be told about. `None` means no Wayland connection is available.
-#[cfg(target_os = "linux")]
-use wayland_client::globals::GlobalListContents;
-#[cfg(target_os = "linux")]
-use wayland_client::protocol::wl_registry::WlRegistry;
-
-#[cfg(target_os = "linux")]
-impl wayland_client::Dispatch<WlRegistry, GlobalListContents> for GlobalProbe {
-    fn event(
-        _state: &mut Self,
-        _proxy: &WlRegistry,
-        _event: <WlRegistry as wayland_client::Proxy>::Event,
-        _data: &GlobalListContents,
-        _conn: &wayland_client::Connection,
-        _qhandle: &wayland_client::QueueHandle<Self>,
-    ) {
-        // GlobalListContents already records the globals; nothing to do.
-    }
-}
-
-/// No state is needed: `GlobalListContents` records the advertised globals.
-#[cfg(target_os = "linux")]
-#[derive(Default)]
-struct GlobalProbe;
-
-#[cfg(target_os = "linux")]
-fn probe_wayland_compositor() -> Option<bool> {
-    use wayland_client::globals::registry_queue_init;
-    use wayland_client::Connection;
-
-    let connection = Connection::connect_to_env().ok()?;
-    let Ok((globals, _queue)) = registry_queue_init::<GlobalProbe>(&connection) else {
-        return Some(false);
-    };
-    let has_compositor = globals
-        .contents()
-        .clone_list()
-        .iter()
-        .any(|global| global.interface == "wl_compositor");
-    drop(globals);
-    Some(has_compositor)
-}
-
-/// Whether a native Wayland compositor is available to this process.
-#[cfg(target_os = "linux")]
-pub fn wayland_compositor_available() -> bool {
-    is_wayland_session() && probe_wayland_compositor().unwrap_or(false)
-}
-
-#[cfg(all(any(target_os = "linux", target_os = "freebsd"), not(target_os = "linux")))]
-pub fn wayland_compositor_available() -> bool {
-    false
-}
-
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub fn window_is_wayland(window: &winit::window::Window) -> bool {
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
