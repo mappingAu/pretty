@@ -25,9 +25,83 @@ use pretty_renderer::probe_adapters;
 use pretty_renderer::RendererKind;
 use winit::event_loop::EventLoop;
 
-use crate::app::{AppOptions, PrettyApp, UserEvent};
+use crate::app::{AppOptions, PrettyApp, RendererNotice, UserEvent};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Why GLES cannot present on native Wayland on this host, or `None` when the
+/// GLES backend keeps the native Wayland surface.
+///
+/// GLES is compiled for desktop Linux/Mac/BSD only; the affected combination
+/// is Linux on a Wayland session with the current NVIDIA driver, whose Wayland
+/// EGL path exposes no usable window presentation config.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+fn gles_wayland_limitation() -> Option<&'static str> {
+    #[cfg(target_os = "linux")]
+    {
+        // The bundled BSD builds keep a native Wayland surface; only Linux
+        // has the EGL driver limitation.
+        Some(
+            "On Wayland this driver cannot present OpenGL ES natively, so \
+             Pretty uses an X11/XWayland window instead of a native Wayland one.",
+        )
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+fn gles_wayland_limitation() -> Option<&'static str> {
+    None
+}
+
+/// Startup notice for a rendering backend that cannot run as configured.
+///
+/// Returns `None` when nothing was substituted. A requested backend that was
+/// rewritten by `Config::validate` (e.g. GLES on a Windows build) or GLES on a
+/// Wayland session falling back to X11 both produce a modal instead of a
+/// silent change.
+fn renderer_notice_for(
+    config: &crate::config::Config,
+    gles_wayland_fallback: bool,
+    display: platform::DisplayKind,
+    wayland_session: bool,
+) -> Option<RendererNotice> {
+    let requested = config.requested_renderer.as_str();
+    if requested.is_empty() || requested == "auto" {
+        return None;
+    }
+    if requested != config.renderer {
+        return Some(RendererNotice::RendererUnavailable {
+            requested: requested.to_owned(),
+        });
+    }
+    if gles_wayland_fallback && wayland_session {
+        let actual = if display == platform::DisplayKind::Wayland {
+            "Wayland"
+        } else {
+            "X11 (XWayland)"
+        };
+        return Some(RendererNotice::GlesNeedsX11 {
+            session: "Wayland",
+            actual,
+        });
+    }
+    None
+}
+
+/// Whether selecting GLES on this Linux host loses native Wayland.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+fn gles_forces_x11() -> bool {
+    gles_wayland_limitation().is_some()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+fn gles_forces_x11() -> bool {
+    false
+}
 
 #[cfg(not(target_os = "android"))]
 #[derive(Debug, Default)]
@@ -349,6 +423,8 @@ mod android_entry {
             renderer,
             command: None,
             argv: Vec::new(),
+            gles_wayland_fallback: false,
+            startup_notice: None,
             fullscreen: false,
             title: None,
             config_path: path,
@@ -475,15 +551,46 @@ fn main() -> ExitCode {
     // so winit/IME use text-input-v3 (Fcitx's normal candidate popup) and KWin
     // can blur through the org_kde_kwin_blur protocol. The former
     // prefer_x11_for_blur switch is retained only for config compatibility.
+    //
+    // The fallback is recorded and the window shows a one-time notice; the
+    // settings dialog also warns before the user selects GLES.
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    {
+    let mut wayland_display_for_notice: Option<std::ffi::OsString> = None;
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    let gles_wayland_fallback = {
         let gles_on_x11 = renderer == RendererKind::Gles;
-        if gles_on_x11
+        let fallback = gles_on_x11
             && std::env::var_os("DISPLAY").is_some()
-            && std::env::var_os("WAYLAND_DISPLAY").is_some()
-        {
+            && std::env::var_os("WAYLAND_DISPLAY").is_some();
+        if fallback {
+            // Only winit's backend choice cares about the variable: it reads
+            // the environment once while building the event loop, so the value
+            // is restored right after that (before the app starts).
+            wayland_display_for_notice = std::env::var_os("WAYLAND_DISPLAY");
             std::env::remove_var("WAYLAND_DISPLAY");
             log::info!("GLES backend selected; using X11/XWayland window surface (native Wayland EGL presentation is not supported by this driver)");
+        }
+        fallback
+    };
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+    let gles_wayland_fallback = false;
+
+    // Explain a silent fallback: the configured backend could not start, or
+    // GLES had to leave native Wayland for X11/XWayland.
+    let renderer_notice = renderer_notice_for(
+        &config,
+        gles_wayland_fallback,
+        platform::current_display_kind(),
+        platform::is_wayland_session(),
+    );
+    if let Some(kind) = &renderer_notice {
+        match kind {
+            RendererNotice::GlesNeedsX11 { .. } => {
+                log::info!("GLES/Wayland notice queued (window runs through XWayland)")
+            }
+            RendererNotice::RendererUnavailable { requested } => log::warn!(
+                "requested backend '{requested}' cannot start here; showing fallback notice"
+            ),
         }
     }
 
@@ -516,10 +623,21 @@ fn main() -> ExitCode {
         }
     };
     event_loop.set_control_flow(winit::event_loop::ControlFlow::Wait);
+    // winit has already chosen its backend (X11 when GLES cleared
+    // WAYLAND_DISPLAY). Restore the Wayland display so the app can tell a
+    // Wayland session that fell back to XWayland from a real X11 session.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    if gles_wayland_fallback {
+        if let Some(display) = wayland_display_for_notice.take() {
+            std::env::set_var("WAYLAND_DISPLAY", display);
+        }
+    }
     let options = AppOptions {
         renderer,
         command: cli.command,
         argv: cli.argv.unwrap_or_default(),
+        gles_wayland_fallback,
+        startup_notice: renderer_notice,
         fullscreen: cli.fullscreen,
         title: cli.title,
         config_path: path,

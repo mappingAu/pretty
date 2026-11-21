@@ -36,6 +36,9 @@ pub struct SettingsState {
     /// First click on "Reset all settings" arms the action; a second click
     /// within a few seconds applies the defaults.
     reset_armed: Option<Instant>,
+    /// A backend choice that loses native Wayland (GLES) and awaits
+    /// confirmation. The draft already holds the new value.
+    pub pending_renderer: Option<String>,
 }
 
 impl SettingsState {
@@ -48,6 +51,7 @@ impl SettingsState {
             import_status: None,
             pending_import: None,
             reset_armed: None,
+            pending_renderer: None,
         }
     }
 
@@ -77,6 +81,11 @@ pub struct SettingsOutcome {
     pub import: Option<PathBuf>,
     /// The user asked to resize the window to these logical pixels.
     pub resize: Option<(u32, u32)>,
+    /// The user confirmed a backend that needs an explicit warning (GLES on
+    /// Wayland). The draft already carries the new value.
+    pub confirm_renderer: Option<String>,
+    /// The user cancelled that backend change; the draft was rolled back.
+    pub cancel_renderer: bool,
     /// The user confirmed a full reset to the built-in defaults.
     pub reset: bool,
 }
@@ -213,7 +222,14 @@ pub fn show(
                     Tab::Terminal => terminal(ui, &mut draft, lang, &mut changed),
                     Tab::Appearance => appearance(ui, &mut draft, lang, &mut changed),
                     Tab::TabBar => tab_bar_settings(ui, &mut draft, lang, &mut changed),
-                    Tab::Rendering => rendering(ui, &mut draft, info, lang, &mut changed),
+                    Tab::Rendering => rendering(
+                        ui,
+                        &mut draft,
+                        info,
+                        lang,
+                        &mut changed,
+                        &mut state.pending_renderer,
+                    ),
                     Tab::Keyboard => keyboard(ui, &mut draft, info, lang, &mut changed),
                     Tab::About => about(ui, version, info, lang),
                 });
@@ -250,6 +266,27 @@ pub fn show(
                 }
             });
         });
+    // A backend choice that loses native Wayland gets an explicit warning
+    // before it takes effect; cancelling rolls the draft back.
+    let mut confirm_backend = None;
+    let mut cancel_backend = false;
+    renderer_notice_modal(
+        ctx,
+        &state.pending_renderer,
+        &mut draft,
+        lang,
+        &mut confirm_backend,
+        &mut cancel_backend,
+    );
+    if let Some(target) = confirm_backend {
+        state.pending_renderer = None;
+        outcome.confirm_renderer = Some(target);
+    } else if cancel_backend {
+        state.pending_renderer = None;
+        draft.renderer = "auto".to_owned();
+        outcome.cancel_renderer = true;
+        changed = false;
+    }
     // The import button records a request the application fulfils after this
     // frame, so all file I/O (and error reporting) stays out of the UI layout.
     if let Some(path) = state.pending_import.take() {
@@ -257,6 +294,10 @@ pub fn show(
     }
     state.open = open;
     state.tab = tab;
+    if outcome.confirm_renderer.is_some() {
+        changed = true;
+        outcome.changed = true;
+    }
     if changed {
         state.draft = draft;
     }
@@ -1117,9 +1158,12 @@ fn rendering(
     info: &RuntimeInfo<'_>,
     lang: Lang,
     changed: &mut bool,
+    // A backend selected here but not yet confirmed (its warning is open).
+    pending: &mut Option<String>,
 ) {
     ui.horizontal(|ui| {
         ui.label(tr(lang, "Backend"));
+        let before = cfg.renderer.clone();
         egui::ComboBox::from_id_salt("renderer-choice")
             .selected_text(cfg.renderer.clone())
             .show_ui(ui, |ui| {
@@ -1146,6 +1190,16 @@ fn rendering(
                         .changed()
                     {
                         *changed = true;
+                    }
+                }
+                // GLES cannot present on native Wayland on Linux; warn before
+                // the change takes effect instead of switching silently. The
+                // draft keeps the new value while the warning is open.
+                if cfg.renderer != before {
+                    if gles_needs_wayland_notice(&before, &cfg.renderer) {
+                        *pending = Some(cfg.renderer.clone());
+                    } else {
+                        *pending = None;
                     }
                 }
             });
@@ -1195,6 +1249,61 @@ fn rendering(
         ui.add_space(6.0);
         ui.colored_label(egui::Color32::from_rgb(240, 190, 90), note);
     }
+}
+
+/// Whether choosing `to` (from `from`) has to warn that GLES loses native
+/// Wayland. Only Linux on a Wayland session is affected.
+fn gles_needs_wayland_notice(from: &str, to: &str) -> bool {
+    if to != "gles" || from == "gles" || !cfg!(target_os = "linux") {
+        return false;
+    }
+    crate::platform::is_wayland_session()
+}
+
+/// Warning shown while a backend choice awaits confirmation.
+fn renderer_notice_modal(
+    ctx: &egui::Context,
+    pending: &Option<String>,
+    cfg: &mut Config,
+    lang: Lang,
+    confirm: &mut Option<String>,
+    cancel: &mut bool,
+) {
+    let Some(target) = pending.as_deref() else { return };
+    if !gles_needs_wayland_notice("auto", target) {
+        return;
+    }
+    let actual = crate::platform::current_display_kind().label();
+    let modal = egui::Modal::new(egui::Id::new("pretty-gles-wayland-confirm")).show(ctx, |ui| {
+        ui.set_min_width(360.0);
+        ui.heading(tr(lang, "GLES runs through XWayland"));
+        ui.label(tr(
+            lang,
+            "This NVIDIA driver cannot present OpenGL ES in a native Wayland window. Pretty therefore runs the X11/XWayland window instead: input methods, scaling and compositor blur behave differently from native Wayland.",
+        ));
+        ui.add_space(6.0);
+        ui.label(egui::RichText::new(format!("session: Wayland")).small().weak());
+        ui.label(
+            egui::RichText::new(format!("window: X11 (XWayland) · current: {actual}"))
+                .small()
+                .weak(),
+        );
+        ui.add_space(6.0);
+        ui.label(tr(lang, "Backend changes take effect after restarting Pretty."));
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            if ui.button(tr(lang, "Use GLES anyway")).clicked() {
+                *confirm = Some(target.to_owned());
+            }
+            if ui.button(tr(lang, "Cancel")).clicked() {
+                *cancel = true;
+            }
+        });
+    });
+    if modal.should_close() {
+        *cancel = true;
+    }
+    let _ = cfg;
 }
 
 fn keyboard(

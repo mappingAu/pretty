@@ -246,6 +246,12 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
         "Empty colours mean automatic: the value is derived from the active theme and tab-bar style." => "颜色留空表示自动：数值取自当前主题与标签栏样式。",
         "Saved as the startup size; Apply resizes now. Remember window size stores the last size on exit." => "保存为启动尺寸；“应用”立即调整大小。“记住窗口大小”会在退出时保存最后的尺寸。",
         "Import font, colours, cursor, scrollback, padding, opacity, bell, copy-on-select, tab bar, mouse, scrolling and key maps from a kitty.conf. Unsupported options are reported, never fatal." => "从 kitty.conf 导入字体、颜色、光标、回滚、内边距、不透明度、响铃、选择即复制、标签栏、鼠标、滚动和按键映射。不支持的选项会报告，但不会中断导入。",
+        "GLES runs through XWayland" => "GLES 通过 XWayland 运行",
+        "This NVIDIA driver cannot present OpenGL ES in a native Wayland window. Pretty therefore runs the X11/XWayland window instead: input methods, scaling and compositor blur behave differently from native Wayland." => "当前的 NVIDIA 驱动无法在原生 Wayland 窗口中呈现 OpenGL ES，因此 Pretty 改为运行 X11/XWayland 窗口：输入法、缩放与合成器模糊的表现和原生 Wayland 不同。",
+        "Use GLES anyway" => "仍然使用 GLES",
+        "Rendering backend unavailable" => "渲染后端不可用",
+        "The selected backend cannot start on this machine, so Pretty fell back to the automatic choice. Pick another backend in Rendering settings." => "所选后端无法在此机器上启动，Pretty 已回退到自动选择。请在“渲染”设置中改选其他后端。",
+        "OK" => "确定",
         _ => key,
     }
 }

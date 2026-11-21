@@ -11,6 +11,104 @@ pub mod other;
 /// Cross-platform XDG/AppData/Application Support path resolution.
 pub mod paths;
 
+/// How the running process is actually connected to the display server.
+///
+/// The GLES backend runs on X11/XWayland on Linux, so "the user is on a
+/// Wayland session" is not the same as "this window is a Wayland window".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DisplayKind {
+    Wayland,
+    X11,
+    Other,
+}
+
+impl DisplayKind {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Wayland => "Wayland",
+            Self::X11 => "X11",
+            Self::Other => "unknown",
+        }
+    }
+}
+
+pub fn current_display_kind() -> DisplayKind {
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        DisplayKind::Wayland
+    } else if std::env::var_os("DISPLAY").is_some() {
+        DisplayKind::X11
+    } else {
+        DisplayKind::Other
+    }
+}
+
+/// True when this is a native Wayland session (even if Pretty itself fell
+/// back to X11/XWayland for the GLES backend).
+pub fn is_wayland_session() -> bool {
+    std::env::var_os("WAYLAND_DISPLAY").is_some()
+        || std::env::var_os("XDG_SESSION_TYPE")
+            .map(|value| value.eq_ignore_ascii_case("wayland"))
+            .unwrap_or(false)
+}
+
+/// Probe the compositor advertised globals on a short-lived connection.
+///
+/// Used before falling back to X11 for GLES: if `wl_compositor` is advertised
+/// and Pretty still cannot use native Wayland, that is a driver limitation the
+/// user has to be told about. `None` means no Wayland connection is available.
+#[cfg(target_os = "linux")]
+use wayland_client::globals::GlobalListContents;
+#[cfg(target_os = "linux")]
+use wayland_client::protocol::wl_registry::WlRegistry;
+
+#[cfg(target_os = "linux")]
+impl wayland_client::Dispatch<WlRegistry, GlobalListContents> for GlobalProbe {
+    fn event(
+        _state: &mut Self,
+        _proxy: &WlRegistry,
+        _event: <WlRegistry as wayland_client::Proxy>::Event,
+        _data: &GlobalListContents,
+        _conn: &wayland_client::Connection,
+        _qhandle: &wayland_client::QueueHandle<Self>,
+    ) {
+        // GlobalListContents already records the globals; nothing to do.
+    }
+}
+
+/// No state is needed: `GlobalListContents` records the advertised globals.
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+struct GlobalProbe;
+
+#[cfg(target_os = "linux")]
+fn probe_wayland_compositor() -> Option<bool> {
+    use wayland_client::globals::registry_queue_init;
+    use wayland_client::Connection;
+
+    let connection = Connection::connect_to_env().ok()?;
+    let Ok((globals, _queue)) = registry_queue_init::<GlobalProbe>(&connection) else {
+        return Some(false);
+    };
+    let has_compositor = globals
+        .contents()
+        .clone_list()
+        .iter()
+        .any(|global| global.interface == "wl_compositor");
+    drop(globals);
+    Some(has_compositor)
+}
+
+/// Whether a native Wayland compositor is available to this process.
+#[cfg(target_os = "linux")]
+pub fn wayland_compositor_available() -> bool {
+    is_wayland_session() && probe_wayland_compositor().unwrap_or(false)
+}
+
+#[cfg(all(any(target_os = "linux", target_os = "freebsd"), not(target_os = "linux")))]
+pub fn wayland_compositor_available() -> bool {
+    false
+}
+
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub fn window_is_wayland(window: &winit::window::Window) -> bool {
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};

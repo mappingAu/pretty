@@ -29,6 +29,11 @@ renderer or represent a compile-only stub as a supported platform.
   they open the configured login shell, like Konsole. The window/tab title now
   follows the PTY foreground process on Linux (`tcgetpgrp`,
   `/proc/<pgid>/comm`) instead of staying at the shell name.
+- GLES on a Wayland session is announced instead of falling back to
+  X11/XWayland silently: a modal explains the driver limitation at startup,
+  and the Rendering tab asks "Use GLES anyway / Cancel" before the value is
+  applied. A backend that cannot start at all is reported the same way
+  instead of being rewritten to `auto` silently.
   See `docs/TEST-REPORT-V0.2.4.md`.
 
 ## Resolved in 0.2.3
@@ -86,8 +91,10 @@ renderer or represent a compile-only stub as a supported platform.
    Wayland EGL path does not expose a usable window presentation config
    (`EGL_NATIVE_RENDERABLE` absent; `eglCreateWindowSurface` fails). Pretty
    therefore clears `WAYLAND_DISPLAY` when the GLES backend is selected and uses
-   an X11 surface. Native Wayland GLES is not usable. Vulkan works on native
-   Wayland with KWin blur via `ext_background_effect_v1`.
+   an X11 surface. Native Wayland GLES is not usable. This is not silent: since
+   0.2.4 the window shows a dismissible notice, and the Rendering settings ask
+   for confirmation when GLES is selected on a Wayland session. Vulkan works on
+   native Wayland with KWin blur via `ext_background_effect_v1`.
 2. **GLES requires the vendored wgpu-hal GLES patch.** Upstream wgpu would pick
    desktop OpenGL on this EGL implementation. See `docs/RENDERER.md` and
    `vendor/wgpu-hal`. This is a deliberate, documented local patch, not a silent

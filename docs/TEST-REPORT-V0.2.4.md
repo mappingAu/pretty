@@ -75,6 +75,29 @@ new timer or repaint an idle window. An explicit OSC title, and `--title`, win
 over the sampled name; clearing the OSC title returns to it. New tabs start
 from the login shell name, and `-e htop` starts from `htop`, not `bash`.
 
+## GLES on Wayland is announced
+
+GLES cannot present in a native Wayland window on this driver, so Pretty runs
+the window through X11/XWayland. That fallback is no longer silent:
+
+- **Startup:** when the configured backend is GLES on a Wayland session, the
+  window shows a dismissible modal ("GLES runs through XWayland") with the
+  session (`Wayland`) and the actual window (`X11 (XWayland)`), plus a note
+  that IME, scaling and blur differ from native Wayland. `--renderer vulkan`
+  and `auto` show nothing.
+- **Settings → Rendering:** selecting GLES on a Wayland session opens the same
+  explanation with "Use GLES anyway" / "Cancel". Cancelling rolls the draft
+  back; confirming applies it (restart required, as before).
+- **Backend that cannot start:** a backend that `Config::validate` rewrites to
+  `auto` (e.g. `metal` on Linux, GLES on Windows) now produces a
+  "Rendering backend unavailable" modal naming the requested backend, from a
+  config file or from the settings dialog.
+- `Config::requested_renderer` keeps the user's original choice (runtime-only,
+  never persisted) so the notices can name what was requested.
+- The winit dependency now declares its features explicitly and
+  `wayland-client`/`wayland-protocols` are Linux-only, so other targets still
+  build.
+
 ## Verification
 
 Direct terminal-launcher form (the exact shape KDE used for `Terminal=true`):
@@ -98,11 +121,14 @@ New CLI tests (`crates/pretty-app/src/main.rs`):
 - `terminal_e_requires_a_command`
 - `self_launch_is_detected_and_skipped`
 - `new_tabs_do_not_repeat_the_launcher_command` (app)
+- `gles_request_shows_a_wayland_notice_instead_of_switching_silently` (app)
+- `unavailable_backend_reports_the_requested_name` (app)
+- `gles_request_is_tracked_for_the_deprecation_notice` (config)
 
 ```
 cargo test --workspace --locked
-# 52 app + 61 core + 9 audit + 2 PTY (+1 ignored) + 4 QA + 15 renderer
-# = 143 passed, 1 ignored, 0 failed
+# 55 app + 61 core + 9 audit + 2 PTY (+1 ignored) + 4 QA + 15 renderer
+# = 146 passed, 1 ignored, 0 failed
 ```
 
 The native-Wayland drag-and-drop bridge is unchanged.

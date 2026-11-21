@@ -173,6 +173,13 @@ pub struct AppOptions {
     /// Arguments after `-e`/`-x`, executed directly. Takes precedence over
     /// `command`; unlike `--command` it is not re-parsed by a shell.
     pub argv: Vec<String>,
+    /// True when GLES was selected on a Wayland session but the window had to
+    /// run through X11/XWayland (native Wayland EGL is unusable on this
+    /// driver). The window then shows a one-time notice.
+    pub gles_wayland_fallback: bool,
+    /// User-visible warning shown as a modal after the first frame, e.g. that
+    /// the configured GLES backend falls back to X11/XWayland.
+    pub startup_notice: Option<RendererNotice>,
     pub fullscreen: bool,
     pub title: Option<String>,
     pub config_path: PathBuf,
@@ -433,6 +440,11 @@ pub struct PrettyApp {
     search: SearchState,
     exit_requested: bool,
     drop_hover: Option<PathBuf>,
+    /// Modal warning shown until the user dismisses it (GLES/Wayland, backend
+    /// fallbacks). `None` means no notice.
+    renderer_notice: Option<RendererNotice>,
+    /// Last notice that was drawn (avoids repeating the log every frame).
+    notice_logged: Option<RendererNotice>,
     /// A file drag is over the window (Wayland only; winit 0.30 does not
     /// implement data-device drag events on Wayland).
     #[cfg(target_os = "linux")]
@@ -459,6 +471,59 @@ pub struct PrettyApp {
     touch_scroll_y: Option<f64>,
     touch_scroll_pane: Option<PaneId>,
     touch_gesture: Option<TouchGesture>,
+}
+
+/// A dismissible warning about the display/rendering setup.
+///
+/// The message is stored as data (`&'static str` keys plus parameters), not as
+/// a pre-formatted English string, so the modal follows the UI language even
+/// when the language is switched while it is open.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RendererNotice {
+    /// GLES cannot present on native Wayland on this host; the window runs
+    /// through X11/XWayland.
+    GlesNeedsX11 {
+        /// Session display the user is on ("Wayland").
+        session: &'static str,
+        /// What this process actually runs on ("X11 (XWayland)").
+        actual: &'static str,
+    },
+    /// A renderer selected from the settings dialog cannot start here.
+    RendererUnavailable { requested: String },
+}
+
+impl RendererNotice {
+    fn new(message: String) -> Self {
+        Self::RendererUnavailable { requested: message }
+    }
+
+    fn title(&self, lang: Lang) -> String {
+        match self {
+            Self::GlesNeedsX11 { .. } => tr(lang, "GLES runs through XWayland").to_owned(),
+            Self::RendererUnavailable { .. } => {
+                tr(lang, "Rendering backend unavailable").to_owned()
+            }
+        }
+    }
+
+    fn body(&self, lang: Lang) -> String {
+        match self {
+            Self::GlesNeedsX11 { session, actual } => format!(
+                "{}\n\nsession: {session}\nwindow: {actual}",
+                tr(
+                    lang,
+                    "This NVIDIA driver cannot present OpenGL ES in a native Wayland window. Pretty therefore runs the X11/XWayland window instead: input methods, scaling and compositor blur behave differently from native Wayland."
+                )
+            ),
+            Self::RendererUnavailable { requested } => format!(
+                "{}\n\nbackend: {requested}",
+                tr(
+                    lang,
+                    "The selected backend cannot start on this machine, so Pretty fell back to the automatic choice. Pick another backend in Rendering settings."
+                )
+            ),
+        }
+    }
 }
 
 struct Benchmark {
@@ -506,6 +571,7 @@ impl PrettyApp {
                 log::warn!("cursor blink timer thread unavailable: {e}");
             }
         }
+        let renderer_notice = options.startup_notice.clone();
         Self {
             config,
             options,
@@ -549,6 +615,8 @@ impl PrettyApp {
             search: SearchState::default(),
             exit_requested: false,
             drop_hover: None,
+            renderer_notice,
+            notice_logged: None,
             #[cfg(target_os = "linux")]
             dnd_hover: false,
             #[cfg(target_os = "linux")]
@@ -2734,6 +2802,16 @@ impl PrettyApp {
         let preedit = self.ime_preedit.clone();
         let ime_cursor = self.ime_cursor;
         let confirm_dialog_open = self.confirm_close_dialog;
+        let renderer_notice = self.renderer_notice.clone();
+        if let Some(notice) = &renderer_notice {
+            // Shown every frame until dismissed; log once when it first
+            // appears so a startup screenshot/triage can confirm it.
+            if self.notice_logged.as_ref() != Some(notice) {
+                log::info!("showing renderer notice: {:?}", notice);
+                self.notice_logged = Some(notice.clone());
+            }
+        }
+        let mut dismiss_renderer_notice = false;
         let bell_flash = self
             .bell_flash_until
             .filter(|until| Instant::now() < *until)
@@ -2860,6 +2938,41 @@ impl PrettyApp {
                     );
                     let _ = modal;
                 }
+                // One-time, dismissible explanation for a renderer/display
+                // substitution (GLES on Wayland, a backend that cannot start).
+                // It is shown above the settings panel when both are open.
+                if let Some(notice) = &renderer_notice {
+                    let modal = egui::Modal::new(egui::Id::new("pretty-renderer-notice")).show(
+                        root.ctx(),
+                        |ui| {
+                            ui.set_min_width(360.0);
+                            ui.heading(notice.title(lang));
+                            for line in notice.body(lang).lines() {
+                                if line.is_empty() {
+                                    ui.add_space(6.0);
+                                } else if line.starts_with("session:")
+                                    || line.starts_with("window:")
+                                    || line.starts_with("backend:")
+                                {
+                                    ui.label(egui::RichText::new(line).small().weak());
+                                } else {
+                                    ui.label(line);
+                                }
+                            }
+                            ui.add_space(8.0);
+                            ui.horizontal(|ui| {
+                                if ui.button(tr(lang, "OK")).clicked() {
+                                    dismiss_renderer_notice = true;
+                                }
+                            });
+                        },
+                    );
+                    // Clicking outside the modal also dismisses it; Esc is
+                    // handled by egui's modal backdrop.
+                    if modal.should_close() {
+                        dismiss_renderer_notice = true;
+                    }
+                }
                 if bell_flash {
                     // Visual bell: a short accent-coloured border flash. The
                     // repaint timer is driven from `about_to_wait`.
@@ -2920,6 +3033,15 @@ impl PrettyApp {
         } else if changed {
             self.config = self.settings.draft.clone();
             self.config.validate();
+            // A backend that cannot start on this host is rewritten to `auto`
+            // by validate(); tell the user instead of applying it silently.
+            if !self.settings.draft.renderer.is_empty()
+                && self.settings.draft.renderer != self.config.renderer
+            {
+                self.renderer_notice = Some(RendererNotice::RendererUnavailable {
+                    requested: self.settings.draft.renderer.clone(),
+                });
+            }
             self.settings.draft = self.config.clone();
             self.config_changed();
         }
@@ -2933,6 +3055,11 @@ impl PrettyApp {
             self.config.window_height = height;
             let _ = window.request_inner_size(LogicalSize::new(width as f64, height as f64));
             self.config_changed();
+        }
+        if dismiss_renderer_notice {
+            if let Some(notice) = self.renderer_notice.take() {
+                log::info!("renderer notice acknowledged: {:?}", notice);
+            }
         }
         if confirm_quit {
             self.confirm_close_dialog = false;
@@ -4115,6 +4242,48 @@ mod tests {
             super::file_drop_text(std::path::Path::new("/tmp/plain")).as_deref(),
             Some("'/tmp/plain' ")
         );
+    }
+
+    #[test]
+    fn gles_request_shows_a_wayland_notice_instead_of_switching_silently() {
+        use crate::platform::DisplayKind;
+        let mut config = crate::config::Config::default();
+        config.renderer = "gles".into();
+        config.validate();
+        // GLES on a Wayland session that had to use X11/XWayland.
+        let notice = crate::renderer_notice_for(&config, true, DisplayKind::X11, true);
+        assert!(matches!(
+            notice,
+            Some(super::RendererNotice::GlesNeedsX11 { session: "Wayland", actual: "X11 (XWayland)" })
+        ));
+        // Pure X11 session: nothing to warn about.
+        assert!(crate::renderer_notice_for(&config, false, DisplayKind::X11, false).is_none());
+        // `auto` never warns, and a native Wayland GLES window never warns.
+        config.renderer = "auto".into();
+        config.validate();
+        assert!(crate::renderer_notice_for(&config, false, DisplayKind::Wayland, true).is_none());
+    }
+
+    #[test]
+    fn unavailable_backend_reports_the_requested_name() {
+        let mut config = crate::config::Config::default();
+        config.renderer = "metal".into();
+        config.validate();
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert_eq!(config.renderer, "auto");
+            assert_eq!(config.requested_renderer, "metal");
+            let notice = crate::renderer_notice_for(
+                &config,
+                false,
+                crate::platform::DisplayKind::Other,
+                false,
+            );
+            assert!(matches!(
+                notice,
+                Some(super::RendererNotice::RendererUnavailable { ref requested }) if requested == "metal"
+            ));
+        }
     }
 
     #[test]

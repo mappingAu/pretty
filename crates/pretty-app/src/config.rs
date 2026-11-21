@@ -24,6 +24,12 @@ use serde::{Deserialize, Serialize};
 pub struct Config {
     // ---- rendering / terminal ----
     pub renderer: String,
+    /// What the user actually asked for. `validate` rewrites `renderer` to
+    /// `auto` when the choice cannot start on this host; this keeps the
+    /// original choice so the app can explain the fallback instead of it
+    /// happening silently. Runtime-only: never read from or written to disk.
+    #[serde(default = "default_renderer", skip_serializing, skip_deserializing)]
+    pub requested_renderer: String,
     pub font_family: String,
     pub font_size: f32,
     pub line_height: f32,
@@ -126,10 +132,15 @@ pub struct Config {
     pub shortcuts: HashMap<String, String>,
 }
 
+fn default_renderer() -> String {
+    "auto".to_owned()
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
             renderer: "auto".into(),
+            requested_renderer: "auto".into(),
             font_family: "JetBrains Mono".into(),
             font_size: 15.0,
             line_height: 1.18,
@@ -448,6 +459,11 @@ impl Config {
     }
 
     pub fn validate(&mut self) {
+        // Keep the user's choice before any platform fallback rewrites it.
+        // (User-facing warnings compare against this value, so a fallback is
+        // reported instead of silently becoming `auto`.)
+        self.requested_renderer = self.renderer.clone();
+
         sane_f32(&mut self.font_size, 15.0);
         sane_f32(&mut self.line_height, 1.18);
         sane_f32(&mut self.opacity, 0.9);
@@ -1468,6 +1484,26 @@ mod tests {
                 "auto"
             }
         );
+    }
+
+    #[test]
+    fn gles_request_is_tracked_for_the_deprecation_notice() {
+        // Switching to GLES is still allowed (it works through XWayland), but
+        // it is tracked so the window can explain that native Wayland
+        // presentation is unavailable instead of switching silently.
+        let mut config = Config::default();
+        config.renderer = "gles".into();
+        config.validate();
+        assert_eq!(
+            config.renderer,
+            if !cfg!(target_os = "windows") && cfg!(feature = "gles") {
+                "gles"
+            } else {
+                "auto"
+            }
+        );
+        // The original choice stays visible even when it was rewritten.
+        assert_eq!(config.requested_renderer, "gles");
     }
 
     #[test]
