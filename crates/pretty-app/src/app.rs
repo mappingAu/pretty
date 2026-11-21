@@ -173,10 +173,6 @@ pub struct AppOptions {
     /// Arguments after `-e`/`-x`, executed directly. Takes precedence over
     /// `command`; unlike `--command` it is not re-parsed by a shell.
     pub argv: Vec<String>,
-    /// True when GLES was selected on a Wayland session but the window had to
-    /// run through X11/XWayland (native Wayland EGL is unusable on this
-    /// driver). The window then shows a one-time notice.
-    pub gles_wayland_fallback: bool,
     /// User-visible warning shown as a modal after the first frame, e.g. that
     /// the configured GLES backend falls back to X11/XWayland.
     pub startup_notice: Option<RendererNotice>,
@@ -391,7 +387,6 @@ struct TouchGesture {
     col: usize,
     moved: bool,
     mouse: bool,
-    selecting: bool,
 }
 
 pub struct PrettyApp {
@@ -2337,6 +2332,14 @@ impl PrettyApp {
         }
     }
 
+    /// One finger scrolls the terminal history, like a touchscreen trackpad.
+    ///
+    /// Previously a one-finger drag started a text selection (and a mouse
+    /// press in mouse-reporting applications); a swipe was therefore a
+    /// selection gesture rather than a scroll. Touch scrolling is the useful
+    /// default on a terminal: a tap still focuses/clicks once, while a drag
+    /// only scrolls and never selects or sends mouse-drag events. Two-finger
+    /// scrolling remains supported and is handled through the touch centroid.
     fn process_touch(&mut self, touch: winit::event::Touch, egui_consumed: bool) {
         let id = touch.id;
         let loc = touch.location;
@@ -2360,18 +2363,10 @@ impl PrettyApp {
                 self.focused = pane_id;
                 self.mouse.position = Some(loc);
                 let mode = self.panes.get(&pane_id).map(|p| p.term.mode()).unwrap_or_default();
-                let mouse = mode.intersects(TermMode::MOUSE_MODE);
-                if mouse {
-                    if let Some(bytes) = encode_mouse(mode, pretty_core::MouseButton::Left, MouseEventKind::Press, col, row, self.core_modifiers()) {
-                        if let Some(pane) = self.panes.get_mut(&pane_id) {
-                            let _ = pane.pty.write(&bytes);
-                        }
-                    }
-                    self.mouse.button = Some(pretty_core::MouseButton::Left);
-                    self.mouse.last_cell = Some((pane_id, col, row));
-                } else if let Some(pane) = self.panes.get_mut(&pane_id) {
-                    pane.term.start_selection(row, col);
-                }
+                // A drag is a scroll gesture, never a selection. A tap sends
+                // one click in mouse-reporting applications.
+                self.touch_scroll_pane = Some(pane_id);
+                self.touch_scroll_y = Some(loc.y);
                 self.touch_gesture = Some(TouchGesture {
                     id,
                     start: loc,
@@ -2380,8 +2375,7 @@ impl PrettyApp {
                     row,
                     col,
                     moved: false,
-                    mouse,
-                    selecting: !mouse,
+                    mouse: mode.intersects(TermMode::MOUSE_MODE),
                 });
                 if let Some(w) = &self.window {
                     w.request_redraw();
@@ -2394,12 +2388,12 @@ impl PrettyApp {
                     if let Some(last) = self.touch_scroll_y {
                         let dy = ay - last;
                         let cell_h = self.renderer.as_ref().map(|r| r.cell_metrics().cell_h as f64).unwrap_or(18.0);
-                        let lines = (dy / cell_h).trunc() as i32;
+                        let (lines, remainder) = touch_scroll_lines(dy, cell_h);
                         if lines != 0 {
                             if let Some(pane) = self.touch_scroll_pane.and_then(|p| self.panes.get_mut(&p)) {
                                 pane.term.scroll(lines);
                             }
-                            self.touch_scroll_y = Some(ay - (dy % cell_h));
+                            self.touch_scroll_y = Some(ay - remainder);
                             if let Some(w) = &self.window {
                                 w.request_redraw();
                             }
@@ -2423,23 +2417,22 @@ impl PrettyApp {
                 }
                 g.last = loc;
                 if g.moved {
-                    if let Some((_, col, row)) = self.pane_at(loc.x, loc.y) {
-                        g.col = col;
-                        g.row = row;
-                        let mode = self.panes.get(&g.pane).map(|p| p.term.mode()).unwrap_or_default();
-                        if g.mouse {
-                            if mode.contains(TermMode::MOUSE_DRAG) || mode.contains(TermMode::MOUSE_MOTION) {
-                                if self.mouse.last_cell != Some((g.pane, col, row)) {
-                                    self.mouse.last_cell = Some((g.pane, col, row));
-                                    if let Some(bytes) = encode_mouse(mode, pretty_core::MouseButton::Left, MouseEventKind::Motion, col, row, self.core_modifiers()) {
-                                        if let Some(pane) = self.panes.get_mut(&g.pane) {
-                                            let _ = pane.pty.write(&bytes);
-                                        }
-                                    }
-                                }
-                            }
-                        } else if let Some(pane) = self.panes.get_mut(&g.pane) {
-                            pane.term.update_selection(row, col);
+                    let cell_h = self
+                        .renderer
+                        .as_ref()
+                        .map(|r| r.cell_metrics().cell_h as f64)
+                        .unwrap_or(18.0);
+                    let last_y = self.touch_scroll_y.unwrap_or(g.start.y);
+                    let delta = loc.y - last_y;
+                    let (lines, remainder) = touch_scroll_lines(delta, cell_h);
+                    if lines != 0 {
+                        if let Some(pane) = self.panes.get_mut(&g.pane) {
+                            pane.term.scroll(lines);
+                        }
+                        // Keep the sub-cell remainder so slow drags accumulate.
+                        self.touch_scroll_y = Some(loc.y - remainder);
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
                         }
                     }
                 }
@@ -2452,22 +2445,36 @@ impl PrettyApp {
                 log::debug!("touch end id={id} at {loc:?}");
                 self.touch_positions.remove(&id);
                 if let Some(g) = self.touch_gesture.take() {
-                    if g.id == id {
-                        if g.mouse {
-                            let mode = self.panes.get(&g.pane).map(|p| p.term.mode()).unwrap_or_default();
-                            if let Some(bytes) = encode_mouse(mode, pretty_core::MouseButton::Left, MouseEventKind::Release, g.col, g.row, self.core_modifiers()) {
-                                if let Some(pane) = self.panes.get_mut(&g.pane) {
-                                    let _ = pane.pty.write(&bytes);
-                                }
-                            }
-                            self.mouse.button = None;
-                        } else if g.selecting && !g.moved {
+                    if g.id == id && !g.moved && g.mouse && touch.phase == TouchPhase::Ended {
+                        // A tap on a mouse-reporting TUI is still a click, but
+                        // do it as press+release here so a drag never emits a
+                        // mouse drag.
+                        let mode = self.panes.get(&g.pane).map(|p| p.term.mode()).unwrap_or_default();
+                        if let Some(bytes) = encode_mouse(
+                            mode,
+                            pretty_core::MouseButton::Left,
+                            MouseEventKind::Press,
+                            g.col,
+                            g.row,
+                            self.core_modifiers(),
+                        ) {
                             if let Some(pane) = self.panes.get_mut(&g.pane) {
-                                pane.term.clear_selection();
+                                let _ = pane.pty.write(&bytes);
                             }
-                        } else if g.selecting && g.moved && self.config.copy_on_select {
-                            self.copy_selection();
                         }
+                        if let Some(bytes) = encode_mouse(
+                            mode,
+                            pretty_core::MouseButton::Left,
+                            MouseEventKind::Release,
+                            g.col,
+                            g.row,
+                            self.core_modifiers(),
+                        ) {
+                            if let Some(pane) = self.panes.get_mut(&g.pane) {
+                                let _ = pane.pty.write(&bytes);
+                            }
+                        }
+                        self.mouse.button = None;
                     }
                 }
                 if self.touch_positions.len() < 2 {
@@ -2481,6 +2488,9 @@ impl PrettyApp {
         }
     }
 
+    /// Split a touch delta into whole terminal lines plus the sub-cell
+    /// remainder. Keeping the remainder makes a slow drag eventually scroll
+    /// instead of losing every movement smaller than one row.
     fn touch_centroid(&self) -> (f64, f64) {
         if self.touch_positions.is_empty() {
             return (0.0, 0.0);
@@ -2494,21 +2504,10 @@ impl PrettyApp {
     }
 
     fn cancel_touch_gesture(&mut self) {
-        if let Some(g) = self.touch_gesture.take() {
-            if g.mouse {
-                let mode = self.panes.get(&g.pane).map(|p| p.term.mode()).unwrap_or_default();
-                if let Some(bytes) = encode_mouse(mode, pretty_core::MouseButton::Left, MouseEventKind::Release, g.col, g.row, self.core_modifiers()) {
-                    if let Some(pane) = self.panes.get_mut(&g.pane) {
-                        let _ = pane.pty.write(&bytes);
-                    }
-                }
-                self.mouse.button = None;
-            } else if g.selecting {
-                if let Some(pane) = self.panes.get_mut(&g.pane) {
-                    pane.term.clear_selection();
-                }
-            }
-        }
+        // Touch gestures only scroll now; no mouse press was sent when the
+        // finger went down, so there is nothing to release or selection to
+        // clear. Two-finger scrolling takes over from here.
+        self.touch_gesture = None;
     }
 
     /// Drain native Wayland drag events. winit 0.30 does not implement the
@@ -3056,6 +3055,16 @@ impl PrettyApp {
             let _ = window.request_inner_size(LogicalSize::new(width as f64, height as f64));
             self.config_changed();
         }
+        // egui schedules its own animations (scroll rubber-band, kinetic
+        // coasting) through `request_repaint`, but winit only wakes us for
+        // input. Without this, a touch/left-drag released at the end of the
+        // settings list stays visually stuck on the overscroll offset until
+        // the next mouse move; request the frame egui asked for.
+        if self.egui_ctx.has_requested_repaint() {
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+        }
         if dismiss_renderer_notice {
             if let Some(notice) = self.renderer_notice.take() {
                 log::info!("renderer notice acknowledged: {:?}", notice);
@@ -3572,6 +3581,16 @@ impl ApplicationHandler<UserEvent> for PrettyApp {
             }
         }
     }
+}
+
+/// Whole terminal lines and the sub-cell remainder for a touch drag delta.
+fn touch_scroll_lines(delta: f64, cell_h: f64) -> (i32, f64) {
+    if !delta.is_finite() || !cell_h.is_finite() || cell_h <= 0.0 {
+        return (0, 0.0);
+    }
+    let lines = (delta / cell_h).trunc();
+    let lines = lines.clamp(i32::MIN as f64, i32::MAX as f64) as i32;
+    (lines, delta % cell_h)
 }
 
 /// Translate a wheel event into a line count using the kitty
@@ -4242,6 +4261,19 @@ mod tests {
             super::file_drop_text(std::path::Path::new("/tmp/plain")).as_deref(),
             Some("'/tmp/plain' ")
         );
+    }
+
+    #[test]
+    fn touch_drags_scroll_in_whole_rows_and_keep_the_remainder() {
+        use super::touch_scroll_lines;
+        assert_eq!(touch_scroll_lines(0.0, 18.0), (0, 0.0));
+        assert_eq!(touch_scroll_lines(17.9, 18.0), (0, 17.9));
+        assert_eq!(touch_scroll_lines(18.0, 18.0), (1, 0.0));
+        assert_eq!(touch_scroll_lines(-36.0, 18.0), (-2, -0.0));
+        assert_eq!(touch_scroll_lines(45.0, 18.0), (2, 9.0));
+        // Invalid metrics can never scroll or produce a NaN remainder.
+        assert_eq!(touch_scroll_lines(10.0, 0.0), (0, 0.0));
+        assert_eq!(touch_scroll_lines(f64::NAN, 18.0), (0, 0.0));
     }
 
     #[test]

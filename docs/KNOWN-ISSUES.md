@@ -18,6 +18,15 @@ renderer or represent a compile-only stub as a supported platform.
   new frame, at compositor refresh rate) is gone; the fullscreen title bar no
   longer repaints continuously. See `docs/TEST-REPORT-V0.2.1.md`.
 
+## Resolved in 0.2.5
+
+- One-finger touch swipes in the terminal now scroll the scrollback instead of
+  starting a text selection. A tap still focuses/clicks; a drag never selects.
+- Settings overscroll now springs back on its own: egui's requested repaint is
+  forwarded to winit, so touch/left-drag release at the end of the list no
+  longer waits for a mouse move to animate the bounce.
+  See `docs/TEST-REPORT-V0.2.5.md`.
+
 ## Resolved in 0.2.4
 
 - **`.desktop` with `Terminal=true`** now works when Pretty is the desktop's

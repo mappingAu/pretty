@@ -8,7 +8,7 @@ Rust · `wgpu` · Vulkan on every platform (Metal on macOS, Direct3D 12 on Windo
 
 > **Warning**: Part of the code for this project was written by AI (Vibe coding).
 
-[**Download v0.2.4**](https://github.com/mappingAu/pretty/releases/tag/v0.2.4)
+[**Download v0.2.5**](https://github.com/mappingAu/pretty/releases/tag/v0.2.5)
 · [Features](#features)
 · [Install](#install)
 · [Configuration](#configuration)
@@ -99,9 +99,10 @@ a GUI smoke test is not performed there (only `--version`/`--print-info`).
   wheel scrolling; scroll regions and alternate screen from the terminal core.
 - **Tiling panes** with real PTYs, keyboard focus navigation and per-pane
   terminals.
-- **Touchscreen support**: tap to focus, drag to select and two-finger vertical
-  swipes to scroll; touch is translated to mouse reports when an application
-  enables mouse tracking.
+- **Touchscreen support**: one-finger vertical swipes scroll the scrollback
+  (never select text), two-finger swipes also scroll, and a tap focuses/clicks
+  once. A drag does not send mouse-drag reports; taps still click when an
+  application enables mouse tracking.
 - **Right-click context menu** with copy/paste, select all, clear, split/close
   pane, settings and quit. With application mouse reporting enabled, use
   Shift+right-click or the keyboard shortcuts.
@@ -184,8 +185,8 @@ A single-file Flatpak bundle is produced by:
 cargo build --release -p pretty-app
 cp target/release/pretty .portable-pretty   # optional; or pass PRETTY_FLATPAK_BIN
 scripts/build-flatpak.sh
-# dist/pretty-0.2.4-x86_64.flatpak
-flatpak install --user ./dist/pretty-0.2.4-x86_64.flatpak
+# dist/pretty-0.2.5-x86_64.flatpak
+flatpak install --user ./dist/pretty-0.2.5-x86_64.flatpak
 flatpak run io.github.mappingAu.Pretty
 ```
 
@@ -320,15 +321,15 @@ rendering claim in this repository.
 ## Install
 
 Prebuilt binaries for every platform are attached to
-[**v0.2.4**](https://github.com/mappingAu/pretty/releases/tag/v0.2.4):
+[**v0.2.5**](https://github.com/mappingAu/pretty/releases/tag/v0.2.5):
 
 | Platform | Asset | Install |
 |---|---|---|
-| Fedora / RHEL / openSUSE (RPM) | `pretty-terminal-0.2.4-1.x86_64.rpm` | `sudo dnf install ./pretty-terminal-0.2.4-1.x86_64.rpm` (or `zypper install`) |
-| Debian / Ubuntu | `pretty-terminal_0.2.4_amd64.deb` | `sudo apt install ./pretty-terminal_0.2.4_amd64.deb` |
-| Any Linux | `pretty-0.2.4-linux-x86_64.tar.gz` | `tar -xzf … && cd pretty-0.2.4-linux-x86_64 && ./install.sh`, or run `./bin/pretty` |
-| Windows 10/11 | `pretty-0.2.4-windows-x86_64.zip` | unzip and run `pretty.exe` (Direct3D 12 or Vulkan) |
-| macOS 11+ (arm64) | `pretty-0.2.4-macos-arm64.app.tar.gz` | unzip, move `Pretty.app` to Applications, run it |
+| Fedora / RHEL / openSUSE (RPM) | `pretty-terminal-0.2.5-1.x86_64.rpm` | `sudo dnf install ./pretty-terminal-0.2.5-1.x86_64.rpm` (or `zypper install`) |
+| Debian / Ubuntu | `pretty-terminal_0.2.5_amd64.deb` | `sudo apt install ./pretty-terminal_0.2.5_amd64.deb` |
+| Any Linux | `pretty-0.2.5-linux-x86_64.tar.gz` | `tar -xzf … && cd pretty-0.2.5-linux-x86_64 && ./install.sh`, or run `./bin/pretty` |
+| Windows 10/11 | `pretty-0.2.5-windows-x86_64.zip` | unzip and run `pretty.exe` (Direct3D 12 or Vulkan) |
+| macOS 11+ (arm64) | `pretty-0.2.5-macos-arm64.app.tar.gz` | unzip, move `Pretty.app` to Applications, run it |
 
 A Vulkan-capable GPU is required; Pretty never falls back to a CPU
 rasterizer. From source:
@@ -480,9 +481,9 @@ point; it is not a mock.
 
 `scripts/build-packages.sh` produces:
 
-- `dist/pretty-terminal_0.2.4_amd64.deb`
-- `dist/pretty-terminal-0.2.4-1.x86_64.rpm`
-- `dist/pretty-0.2.4-linux-x86_64.tar.gz`
+- `dist/pretty-terminal_0.2.5_amd64.deb`
+- `dist/pretty-terminal-0.2.5-1.x86_64.rpm`
+- `dist/pretty-0.2.5-linux-x86_64.tar.gz`
 
 All contain the binary, desktop entry, icons, man page and `TERM=pretty` terminfo
 entry. The deb/rpm packages install under `/usr`; the tarball is relocatable and
@@ -514,6 +515,7 @@ run (not to a GitHub release).
 - [Known issues](docs/KNOWN-ISSUES.md)
 - [Cross-platform status and prerequisites](docs/CROSS-PLATFORM.md)
 - [Cross-compile report](docs/CROSS-COMPILE.md)
+- [v0.2.5 touch/scroll report](docs/TEST-REPORT-V0.2.5.md)
 - [v0.2.4 terminal-launcher report](docs/TEST-REPORT-V0.2.4.md)
 - [v0.2.3 file-drop report](docs/TEST-REPORT-V0.2.3.md)
 - [v0.2.1 fix and verification report](docs/TEST-REPORT-V0.2.1.md)
@@ -533,9 +535,9 @@ run (not to a GitHub release).
 
 ## About this README
 
-This landing page was rewritten for the v0.2.4 announcement; the original
+This landing page was rewritten for the v0.2.5 announcement; the original
 version is the [`docs/README-original.md`](docs/README-original.md) snapshot, or
-`git show v0.2.4:README.md`.
+`git show v0.2.5:README.md`.
 
 ## License
 
